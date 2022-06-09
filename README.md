@@ -33,7 +33,7 @@ For Linux and Mac OSX, I will be providing cross-compiled releases, which I **ca
 This version is based the latest release from the [rcx github](https://github.com/x0b/rcx). Ive simply replaced the 'librclone.so' file inside the apk with a compiled version of my rclone fork. To be able to install the apk, the app needed to be signed again which i have done with an [apk-signer app](https://play.google.com/store/apps/details?id=com.haibison.apksigner&hl=en&gl=US) from the android playstore, which Im pretty sure isnt malicious. 
 To add realdebrid as a remote, simply setup a realdebrid remote on your PC and copy the `rclone.conf` file (`C:\Users\BigSchlong\.config\rclone`) to your android device. Inside the RCX App you can now load your rclone config file. Youre done, you can mount realdebrid on your android device :)
 
-- download the latest pre-built 'rclone-linux' file from here: https://github.com/itsToggle/rclone_RD/releases
+- download the latest pre-built 'apk' file from here: https://github.com/itsToggle/rclone_RD/releases
 
 ## Setting up the remote (Every OS except android):
 
