@@ -1,3 +1,7 @@
+# NOTICE
+
+### THIS FORK IS NO LONGER NEEDED, SINCE REALDEBRID NOW SUPPORTS WEBDAV! 
+
 # RClone_RD
 
 This RClone Fork contains a Real-Debrid implementation.
