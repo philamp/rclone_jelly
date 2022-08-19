@@ -3,7 +3,7 @@
 ### EVENTHOUGH REALDEBRID NOW SUPPORTS WEBDAV, I STILL RECOMMEND USING THIS FORK
 
 Realdebrid has added support for the WebDav protocoll, which makes it mountable through official rclone software.
-As of now (13.07) this webdav implementation does not support torrent file deletion through rclone. ~and is a whole lot slower than my fork. That is because each time a file is accessed through the webdav server, realdebrid unrestricts the file. If you refresh your plex library of the mounted drive for example, every single file is unrestricted again and again, which takes a very long time.~
+As of now (19.08) realdebrids webdav implementation does not support torrent file deletion through rclone and is a whole lot slower than my fork. That is because each time a file is accessed through the webdav server, realdebrid only checks the first 200 direct links from /downloads. If no corresponding direct link is found, which is most likely the case if you have more than 200 files, the realdebrid webdav will unrestricts the file again. If you refresh your plex library of the mounted drive for example, every single file is unrestricted again and again, which takes a very long time.
 
 They did mention that torrent file deletion works with other webdav mounting programs.
 
@@ -17,13 +17,14 @@ A potential use-case for this is serving the /torrent directory over plex, allow
 ### Capabilities and Limitations:
 
 - Read/Write capabilities are limited to reading files and deleting them. 
+- This rclone fork will automatically sort your torrents into 3 subfolder: "shows", "movies" and "default". If a torrent couldnt be classified as a movie or a show, you can find it in the "default" folder.
 - There are no server-side traffic limitations.
 - This rclone fork will automatically re-activate direct links when they expire after 1 week.
 - There is a server-side connection limit, which I believe is 16 parallel connections.
 
 ## Installation:
 
-For Linux and Mac OSX, I will be providing cross-compiled releases, which I **cannot test**. Please feel free to test them out.
+For Linux and Mac OSX, I will be providing cross-compiled releases. I dont own a mac and cant test the macos release, so please feel free to test it out.
 
 ### Windows:
 
@@ -34,7 +35,7 @@ For Linux and Mac OSX, I will be providing cross-compiled releases, which I **ca
 
 - download the latest pre-built 'rclone-darwin' file from here: https://github.com/itsToggle/rclone_RD/releases
 
-### Linux (untested build):
+### Linux:
 
 - download the latest pre-built 'rclone-linux' file from here: https://github.com/itsToggle/rclone_RD/releases
 
@@ -59,7 +60,7 @@ To add realdebrid as a remote, simply setup a realdebrid remote on your PC and c
 
 It is recommended to use the tags in this example mounting command: 
 
-'rclone cmount torrents: Y: --dir-cache-time=10s --vfs-cache-mode=full'
+'rclone cmount torrents: Y: --dir-cache-time 10s --vfs-cache-mode full'
 
 This will significantly speed up the mounted drive and detect changes faster.
 
