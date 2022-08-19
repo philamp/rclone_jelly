@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -472,8 +473,58 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			//fmt.Printf("Done.\n")
 			torrents = newtorrents
 			if f.opt.SharedFolder == "folders" {
-				result = torrents
+				var ShowsFolder api.Item
+				var MoviesFolder api.Item
+				var DefaultFolder api.Item
+				ShowsFolder.ID = "shows"
+				ShowsFolder.Name = "shows"
+				MoviesFolder.ID = "movies"
+				MoviesFolder.Name = "movies"
+				DefaultFolder.ID = "default"
+				DefaultFolder.Name = "default"
+				result = append(result, ShowsFolder)
+				result = append(result, MoviesFolder)
+				result = append(result, DefaultFolder)
+				for i := range result {
+					item := &result[i]
+					item.Generated = "2006-01-02T15:04:05.000Z"
+				}
 			}
+		} else if f.opt.SharedFolder == "folders" && (dirID == "shows" || dirID == "movies" || dirID == "default") {
+			var artificialType []api.Item
+			if dirID == "shows" {
+				r, _ := regexp.Compile("(?i)(S[0-9]{2}|SEASON|COMPLETE)")
+				for _, torrent := range torrents {
+					match := r.MatchString(torrent.Name)
+					if match {
+						artificialType = append(artificialType, torrent)
+					}
+				}
+				result = artificialType
+			} else if dirID == "movies" {
+				r, _ := regexp.Compile(`(?i)([0-9]{4} ?\.?)`)
+				nr, _ := regexp.Compile("(?i)(S[0-9]{2}|SEASON|COMPLETE)")
+				for _, torrent := range torrents {
+					match := r.MatchString(torrent.Name)
+					exclude := nr.MatchString(torrent.Name)
+					if match && !exclude {
+						artificialType = append(artificialType, torrent)
+					}
+				}
+				result = artificialType
+			} else {
+				r, _ := regexp.Compile(`(?i)([0-9]{4} ?\.?)`)
+				nr, _ := regexp.Compile("(?i)(S[0-9]{2}|SEASON|COMPLETE)")
+				for _, torrent := range torrents {
+					match := r.MatchString(torrent.Name)
+					exclude := nr.MatchString(torrent.Name)
+					if !match && !exclude {
+						artificialType = append(artificialType, torrent)
+					}
+				}
+				result = artificialType
+			}
+
 		} else if f.opt.SharedFolder != "folders" || dirID != rootID {
 			//fmt.Printf("Matching Torrents to Direct Links ... ")
 			for _, torrent := range torrents {
@@ -506,6 +557,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					}
 					ItemFile.ParentID = torrent.ID
 					ItemFile.TorrentHash = torrent.TorrentHash
+					ItemFile.Generated = torrent.Ended
 					result = append(result, ItemFile)
 				}
 				if f.opt.SharedFolder == "folders" {
@@ -553,7 +605,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			t, _ := time.Parse(layout, item.Ended)
 			item.CreatedAt = t.Unix()
 		}
-		if f.opt.SharedFolder == "folders" && dirID == rootID {
+		if f.opt.SharedFolder == "folders" && (dirID == rootID || dirID == "shows" || dirID == "movies" || dirID == "default") {
 			item.Type = "folder"
 		} else {
 			item.Type = "file"
