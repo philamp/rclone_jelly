@@ -44,7 +44,7 @@ type Item struct {
 	TranscodeStatus string       ``
 	IP              string       ``
 	MimeType        string       `json:"mimeType,omitempty"`
-	Ended           string       `json:"ended,omitempty"`
+	Ended           string       `json:"added,omitempty"`
 	Generated       string       `json:"generated,omitempty"`
 	Links           []string     `json:"links,omitempty"`
 	TorrentHash     string       `json:"hash,omitempty"`
