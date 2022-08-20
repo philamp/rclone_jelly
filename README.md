@@ -3,9 +3,9 @@
 ### EVENTHOUGH REALDEBRID NOW SUPPORTS WEBDAV, I STILL RECOMMEND USING THIS FORK
 
 Realdebrid has added support for the WebDav protocoll, which makes it mountable through official rclone software.
-As of now (19.08) realdebrids webdav implementation does not support torrent file deletion through rclone and is a whole lot slower than my fork. That is because each time a file is accessed through the webdav server, realdebrid only checks the first 200 direct links from /downloads. If no corresponding direct link is found, which is most likely the case if you have more than 200 files, the realdebrid webdav will unrestricts the file again. If you refresh your plex library of the mounted drive for example, every single file is unrestricted again and again, which takes a very long time.
+As of now (19.08) realdebrids webdav implementation does not support torrent file deletion through rclone and is a whole lot slower than my fork. That is because each time a file is accessed through the webdav server, realdebrid only checks the first 1000 direct links from /downloads. If no corresponding direct link is found, which is most likely the case if you have more than 1000 files, the realdebrid webdav will unrestricts the file again. If you refresh your plex library of the mounted drive for example (and you have a library of more than 1000 files), every single file is unrestricted again and again, which takes a very long time. plex will also re-detect intros and do other metadata task every time a file is unrestricted again.
 
-They did mention that torrent file deletion works with other webdav mounting programs.
+They did mention that torrent file deletion works with other webdav mounting programs, but I recommend using my fork instead of the realdebrid webdav.
 
 # RClone_RD
 
@@ -18,7 +18,7 @@ A potential use-case for this is serving the /torrent directory over plex, allow
 
 - Read/Write capabilities are limited to reading files and deleting them. 
 - This rclone fork will automatically sort your torrents into 3 subfolder: "shows", "movies" and "default". If a torrent couldnt be classified as a movie or a show, you can find it in the "default" folder.
-- There are no server-side traffic limitations.
+- There are no server-side traffic or storage limitations.
 - This rclone fork will automatically re-activate direct links when they expire after 1 week.
 - There is a server-side connection limit, which I believe is 16 parallel connections.
 
