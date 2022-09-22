@@ -377,6 +377,64 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 	return "", nil //return info.ID, nil
 }
 
+// Redownload a dead torrent
+func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloaded_torrent api.Item) {
+	fmt.Printf("Redownloading dead torrent: " + torrent.Name)
+	//Get dead torrent file and hash info
+	var method = "GET"
+	var path = "/torrents/info/" + torrent.ID
+	var opts = rest.Opts{
+		Method:     method,
+		Path:       path,
+		Parameters: f.baseParams(),
+	}
+	_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
+	var selected_files []int64
+	var dead_torrent_id = torrent.ID
+	for _, file := range torrent.Files {
+		if file.Selected == 1 {
+			selected_files = append(selected_files, file.ID)
+		}
+	}
+	var selected_files_str = strings.Trim(strings.Join(strings.Fields(fmt.Sprint(selected_files)), ","), "[]")
+	//Add torrent again
+	path = "/torrents/addMagnet"
+	method = "POST"
+	opts = rest.Opts{
+		Method: method,
+		Path:   path,
+		MultipartParams: url.Values{
+			"magnet": {"magnet:?xt=urn:btih:" + torrent.TorrentHash},
+		},
+		Parameters: f.baseParams(),
+	}
+	_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
+	time.Sleep(time.Duration(1) * time.Second)
+	//Select the same files again
+	path = "/torrents/selectFiles/" + torrent.ID
+	method = "POST"
+	opts = rest.Opts{
+		Method: method,
+		Path:   path,
+		MultipartParams: url.Values{
+			"files": {selected_files_str},
+		},
+		Parameters: f.baseParams(),
+	}
+	_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
+	//Delete the old torrent
+	path = "/torrents/delete/" + dead_torrent_id
+	method = "DELETE"
+	opts = rest.Opts{
+		Method:     method,
+		Path:       path,
+		Parameters: f.baseParams(),
+	}
+	_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
+	torrent.Status = "downloaded"
+	return torrent
+}
+
 // list the objects into the function supplied
 //
 // If directories is set it only sends directories
@@ -472,6 +530,12 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			})
 			//fmt.Printf("Done.\n")
 			torrents = newtorrents
+			//Handle dead torrents
+			for _, torrent := range torrents {
+				if torrent.Status == "dead" {
+					torrent = f.redownloadTorrent(ctx, torrent)
+				}
+			}
 			if f.opt.SharedFolder == "folders" {
 				var ShowsFolder api.Item
 				var MoviesFolder api.Item
@@ -528,6 +592,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 		} else if f.opt.SharedFolder != "folders" || dirID != rootID {
 			//fmt.Printf("Matching Torrents to Direct Links ... ")
 			for _, torrent := range torrents {
+				var broken = false
 				if f.opt.SharedFolder == "folders" {
 					if dirID != torrent.ID {
 						continue
@@ -553,12 +618,38 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 							},
 							Parameters: f.baseParams(),
 						}
-						resp, err = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
+						resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
+						if resp.StatusCode == 503 {
+							broken = true
+							break
+						}
 					}
 					ItemFile.ParentID = torrent.ID
 					ItemFile.TorrentHash = torrent.TorrentHash
-					ItemFile.Generated = torrent.Ended
+					ItemFile.Generated = torrent.Generated
 					result = append(result, ItemFile)
+				}
+				if broken {
+					torrent = f.redownloadTorrent(ctx, torrent)
+					for _, link := range torrent.Links {
+						var ItemFile api.Item
+						//fmt.Printf("Creating new unrestricted direct link for: '%s'\n", torrent.Name)
+						path = "/unrestrict/link"
+						method = "POST"
+						opts := rest.Opts{
+							Method: method,
+							Path:   path,
+							MultipartParams: url.Values{
+								"link": {link},
+							},
+							Parameters: f.baseParams(),
+						}
+						resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
+						ItemFile.ParentID = torrent.ID
+						ItemFile.TorrentHash = torrent.TorrentHash
+						ItemFile.Generated = torrent.Generated
+						result = append(result, ItemFile)
+					}
 				}
 				if f.opt.SharedFolder == "folders" {
 					break
