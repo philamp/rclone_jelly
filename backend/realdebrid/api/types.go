@@ -39,6 +39,7 @@ type Item struct {
 	OriginalLink    string       `json:"link,omitempty"`
 	Name            string       `json:"filename,omitempty"`
 	Size            int64        `json:"filesize,omitempty"`
+	Status          string       `json:"status,omitempty"`
 	StreamLink      string       ``
 	Type            string       `json:"type,omitempty"`
 	TranscodeStatus string       ``
@@ -47,7 +48,13 @@ type Item struct {
 	Ended           string       `json:"added,omitempty"`
 	Generated       string       `json:"generated,omitempty"`
 	Links           []string     `json:"links,omitempty"`
+	Files           []File       `json:"files,omitempty"`
 	TorrentHash     string       `json:"hash,omitempty"`
+}
+
+type File struct {
+	ID       int64 `json:"id,omitempty"`
+	Selected int64 `json:"selected,omitempty"`
 }
 
 // Breadcrumb is part the breadcrumb trail for a file or folder.  It
