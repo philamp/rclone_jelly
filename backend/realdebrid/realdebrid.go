@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -43,7 +42,6 @@ import (
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/oauthutil"
 	"github.com/rclone/rclone/lib/pacer"
-	"github.com/rclone/rclone/lib/random"
 	"github.com/rclone/rclone/lib/rest"
 	"golang.org/x/oauth2"
 )
@@ -531,9 +529,9 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			//fmt.Printf("Done.\n")
 			torrents = newtorrents
 			//Handle dead torrents
-			for _, torrent := range torrents {
+			for i, torrent := range torrents {
 				if torrent.Status == "dead" {
-					torrent = f.redownloadTorrent(ctx, torrent)
+					torrents[i] = f.redownloadTorrent(ctx, torrent)
 				}
 			}
 			if f.opt.SharedFolder == "folders" {
@@ -591,7 +589,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 
 		} else if f.opt.SharedFolder != "folders" || dirID != rootID {
 			//fmt.Printf("Matching Torrents to Direct Links ... ")
-			for _, torrent := range torrents {
+			for i, torrent := range torrents {
 				var broken = false
 				if f.opt.SharedFolder == "folders" {
 					if dirID != torrent.ID {
@@ -630,7 +628,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					result = append(result, ItemFile)
 				}
 				if broken {
-					torrent = f.redownloadTorrent(ctx, torrent)
+					torrents[i] = f.redownloadTorrent(ctx, torrent)
 					for _, link := range torrent.Links {
 						var ItemFile api.Item
 						//fmt.Printf("Creating new unrestricted direct link for: '%s'\n", torrent.Name)
@@ -907,62 +905,6 @@ func (f *Fs) Purge(ctx context.Context, dir string) error {
 // between directories and a separate one to rename them.  We try to
 // call the minimum number of API calls.
 func (f *Fs) move(ctx context.Context, isFile bool, id, oldLeaf, newLeaf, oldDirectoryID, newDirectoryID string) (err error) {
-	newLeaf = f.opt.Enc.FromStandardName(newLeaf)
-	oldLeaf = f.opt.Enc.FromStandardName(oldLeaf)
-	doRenameLeaf := oldLeaf != newLeaf
-	doMove := oldDirectoryID != newDirectoryID
-
-	// Now rename the leaf to a temporary name if we are moving to
-	// another directory to make sure we don't overwrite something
-	// in the destination directory by accident
-	if doRenameLeaf && doMove {
-		tmpLeaf := newLeaf + "." + random.String(8)
-		err = f.renameLeaf(ctx, isFile, id, tmpLeaf)
-		if err != nil {
-			return fmt.Errorf("Move rename leaf: %w", err)
-		}
-	}
-
-	// Move the object to a new directory (with the existing name)
-	// if required
-	if doMove {
-		opts := rest.Opts{
-			Method:     "POST",
-			Path:       "/folder/paste",
-			Parameters: f.baseParams(),
-			MultipartParams: url.Values{
-				"id": {newDirectoryID},
-			},
-		}
-		opts.MultipartParams.Set("items[0][id]", id)
-		if isFile {
-			opts.MultipartParams.Set("items[0][type]", "file")
-		} else {
-			opts.MultipartParams.Set("items[0][type]", "folder")
-		}
-		//replacedLeaf := enc.FromStandardName(leaf)
-		var resp *http.Response
-		var result api.Response
-		err = f.pacer.Call(func() (bool, error) {
-			resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
-			return shouldRetry(ctx, resp, err)
-		})
-		if err != nil {
-			return fmt.Errorf("Move http: %w", err)
-		}
-		if err = result.AsErr(); err != nil {
-			return fmt.Errorf("Move: %w", err)
-		}
-	}
-
-	// Rename the leaf to its final name if required
-	if doRenameLeaf {
-		err = f.renameLeaf(ctx, isFile, id, newLeaf)
-		if err != nil {
-			return fmt.Errorf("Move rename leaf: %w", err)
-		}
-	}
-
 	return nil
 }
 
@@ -1177,139 +1119,6 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 //
 // The new object may have been created if an error is returned
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
-	remote := o.Remote()
-	size := src.Size()
-
-	// Create the directory for the object if it doesn't exist
-	leaf, directoryID, err := o.fs.dirCache.FindPath(ctx, remote, true)
-	if err != nil {
-		return err
-	}
-	leaf = o.fs.opt.Enc.FromStandardName(leaf)
-
-	var resp *http.Response
-	var info api.FolderUploadinfoResponse
-	opts := rest.Opts{
-		Method:     "POST",
-		Path:       "/folder/uploadinfo",
-		Parameters: o.fs.baseParams(),
-		Options:    options,
-		MultipartParams: url.Values{
-			"id": {directoryID},
-		},
-	}
-	err = o.fs.pacer.Call(func() (bool, error) {
-		resp, err = o.fs.srv.CallJSON(ctx, &opts, nil, &info)
-		if err != nil {
-			return shouldRetry(ctx, resp, err)
-		}
-		// Just check the download URL resolves - sometimes
-		// the URLs returned by realdebrid don't resolve so
-		// this needs a retry.
-		var u *url.URL
-		u, err = url.Parse(info.URL)
-		if err != nil {
-			return true, fmt.Errorf("failed to parse download URL: %w", err)
-		}
-		_, err = net.LookupIP(u.Hostname())
-		if err != nil {
-			return true, fmt.Errorf("failed to resolve download URL: %w", err)
-		}
-		return false, nil
-	})
-	if err != nil {
-		return fmt.Errorf("upload get URL http: %w", err)
-	}
-	if err = info.AsErr(); err != nil {
-		return fmt.Errorf("upload get URL: %w", err)
-	}
-
-	// if file exists then rename it out the way otherwise uploads can fail
-	uploaded := false
-	var oldID = o.id
-	if o.hasMetaData {
-		newLeaf := leaf + "." + random.String(8)
-		fs.Debugf(o, "Moving old file out the way to %q", newLeaf)
-		err = o.fs.renameLeaf(ctx, true, oldID, newLeaf)
-		if err != nil {
-			return fmt.Errorf("upload rename old file: %w", err)
-		}
-		defer func() {
-			// on failed upload rename old file back
-			if !uploaded {
-				fs.Debugf(o, "Renaming old file back (from %q to %q) since upload failed", leaf, newLeaf)
-				newErr := o.fs.renameLeaf(ctx, true, oldID, leaf)
-				if newErr != nil && err == nil {
-					err = fmt.Errorf("upload renaming old file back: %w", newErr)
-				}
-			}
-		}()
-	}
-
-	opts = rest.Opts{
-		Method:  "POST",
-		RootURL: info.URL,
-		Body:    in,
-		MultipartParams: url.Values{
-			"token": {info.Token},
-		},
-		MultipartContentName: "file", // ..name of the parameter which is the attached file
-		MultipartFileName:    leaf,   // ..name of the file for the attached file
-		ContentLength:        &size,
-	}
-	var result api.Response
-	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
-		resp, err = o.fs.srv.CallJSON(ctx, &opts, nil, &result)
-		return shouldRetry(ctx, resp, err)
-	})
-	if err != nil {
-		return fmt.Errorf("upload file http: %w", err)
-	}
-	if err = result.AsErr(); err != nil {
-		return fmt.Errorf("upload file: %w", err)
-	}
-
-	// on successful upload, remove old file if it exists
-	uploaded = true
-	if o.hasMetaData {
-		fs.Debugf(o, "Removing old file")
-		err := o.fs.remove(ctx, oldID)
-		if err != nil {
-			return fmt.Errorf("upload remove old file: %w", err)
-		}
-	}
-
-	o.hasMetaData = false
-	return o.readMetaData(ctx)
-}
-
-// Rename the leaf of a file or directory in a directory
-func (f *Fs) renameLeaf(ctx context.Context, isFile bool, id string, newLeaf string) (err error) {
-	opts := rest.Opts{
-		Method: "POST",
-		MultipartParams: url.Values{
-			"id":   {id},
-			"name": {newLeaf},
-		},
-		Parameters: f.baseParams(),
-	}
-	if isFile {
-		opts.Path = "/item/rename"
-	} else {
-		opts.Path = "/folder/rename"
-	}
-	var resp *http.Response
-	var result api.Response
-	err = f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
-		return shouldRetry(ctx, resp, err)
-	})
-	if err != nil {
-		return fmt.Errorf("rename http: %w", err)
-	}
-	if err = result.AsErr(); err != nil {
-		return fmt.Errorf("rename: %w", err)
-	}
 	return nil
 }
 
