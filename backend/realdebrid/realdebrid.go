@@ -407,7 +407,20 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 		Parameters: f.baseParams(),
 	}
 	_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
-	time.Sleep(time.Duration(1) * time.Second)
+	method = "GET"
+	path = "/torrents/info/" + torrent.ID
+	opts = rest.Opts{
+		Method:     method,
+		Path:       path,
+		Parameters: f.baseParams(),
+	}
+	_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
+	var tries = 0
+	for torrent.Status != "waiting_files_selection" && tries < 5 {
+		time.Sleep(time.Duration(1) * time.Second)
+		_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
+		tries += 1
+	}
 	//Select the same files again
 	path = "/torrents/selectFiles/" + torrent.ID
 	method = "POST"
