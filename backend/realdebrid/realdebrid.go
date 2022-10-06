@@ -76,6 +76,8 @@ var (
 //To limit api calls all pages are stored here and are only updated on changes in the total length
 var cached []api.Item
 var torrents []api.Item
+var lastcheck int64 = time.Now().Unix()
+var interval int64 = 15 * 60
 
 // Register with Fs
 func init() {
@@ -177,7 +179,6 @@ var retryErrorCodes = []int{
 	429, // Too Many Requests.
 	500, // Internal Server Error
 	502, // Bad Gateway
-	503, // Service Unavailable
 	504, // Gateway Timeout
 	509, // Bandwidth Limit Exceeded
 }
@@ -377,7 +378,7 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 
 // Redownload a dead torrent
 func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloaded_torrent api.Item) {
-	fmt.Printf("Redownloading dead torrent: " + torrent.Name)
+	fmt.Println("Redownloading dead torrent: " + torrent.Name)
 	//Get dead torrent file and hash info
 	var method = "GET"
 	var path = "/torrents/info/" + torrent.ID
@@ -443,6 +444,7 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 	}
 	_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
 	torrent.Status = "downloaded"
+	lastcheck = time.Now().Unix() - interval
 	return torrent
 }
 
@@ -468,7 +470,6 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 	if f.opt.RootFolderID == "torrents" {
 		if dirID == rootID {
 			//update global cached list
-			//fmt.Printf("Updating RealDebrid Direct Links ... ")
 			opts := rest.Opts{
 				Method:     method,
 				Path:       path,
@@ -479,6 +480,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			var newcached []api.Item
 			err = f.pacer.Call(func() (bool, error) {
 				var totalcount int
+				var printed = false
 				totalcount = 2
 				for len(newcached) < totalcount {
 					partialresult = nil
@@ -486,7 +488,11 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					if err == nil {
 						totalcount, err = strconv.Atoi(resp.Header["X-Total-Count"][0])
 						if err == nil {
-							if totalcount != len(cached) {
+							if totalcount != len(cached) || time.Now().Unix()-lastcheck > interval {
+								if time.Now().Unix()-lastcheck > interval && !printed {
+									fmt.Println("Last update more than 15min ago. Updating links and torrents.")
+									printed = true
+								}
 								newcached = append(newcached, partialresult...)
 								opts.Parameters.Set("offset", strconv.Itoa(len(newcached)))
 								opts.Parameters.Set("limit", "100")
@@ -523,7 +529,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					if err == nil {
 						totalcount, err = strconv.Atoi(resp.Header["X-Total-Count"][0])
 						if err == nil {
-							if totalcount != len(torrents) {
+							if totalcount != len(torrents) || time.Now().Unix()-lastcheck > interval {
 								newtorrents = append(newtorrents, partialresult...)
 								opts.Parameters.Set("offset", strconv.Itoa(len(newtorrents)))
 								opts.Parameters.Set("limit", "100")
@@ -539,6 +545,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 				}
 				return shouldRetry(ctx, resp, err)
 			})
+			lastcheck = time.Now().Unix()
 			//fmt.Printf("Done.\n")
 			torrents = newtorrents
 			//Handle dead torrents
