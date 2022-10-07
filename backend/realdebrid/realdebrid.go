@@ -76,6 +76,7 @@ var (
 //To limit api calls all pages are stored here and are only updated on changes in the total length
 var cached []api.Item
 var torrents []api.Item
+var broken_torrents []string
 var lastcheck int64 = time.Now().Unix()
 var interval int64 = 15 * 60
 
@@ -445,6 +446,12 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 	_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
 	torrent.Status = "downloaded"
 	lastcheck = time.Now().Unix() - interval
+	for i, TorrentID := range broken_torrents {
+		if dead_torrent_id == TorrentID {
+			broken_torrents[i] = broken_torrents[len(broken_torrents)-1]
+			broken_torrents = broken_torrents[:len(broken_torrents)-1]
+		}
+	}
 	return torrent
 }
 
@@ -549,8 +556,15 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			//fmt.Printf("Done.\n")
 			torrents = newtorrents
 			//Handle dead torrents
+			var broken = false
 			for i, torrent := range torrents {
-				if torrent.Status == "dead" {
+				broken = false
+				for _, TorrentID := range broken_torrents {
+					if torrent.ID == TorrentID {
+						broken = true
+					}
+				}
+				if torrent.Status == "dead" || broken {
 					torrents[i] = f.redownloadTorrent(ctx, torrent)
 				}
 			}
@@ -641,6 +655,10 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 							broken = true
 							break
 						}
+						if resp.StatusCode == 429 {
+							time.Sleep(time.Duration(2) * time.Second)
+							resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
+						}
 					}
 					ItemFile.ParentID = torrent.ID
 					ItemFile.TorrentHash = torrent.TorrentHash
@@ -649,6 +667,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 				}
 				if broken {
 					torrents[i] = f.redownloadTorrent(ctx, torrent)
+					torrent = torrents[i]
 					for _, link := range torrent.Links {
 						var ItemFile api.Item
 						//fmt.Printf("Creating new unrestricted direct link for: '%s'\n", torrent.Name)
@@ -1128,6 +1147,15 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
+		if resp.StatusCode == 503 {
+			for _, TorrentID := range broken_torrents {
+				if o.ParentID == TorrentID {
+					return nil, err
+				}
+			}
+			fmt.Println("Opening file revealed this link to be broken. Torrent will be re-downloaded on next refresh.")
+			broken_torrents = append(broken_torrents, o.ParentID)
+		}
 		return nil, err
 	}
 	return resp.Body, err
