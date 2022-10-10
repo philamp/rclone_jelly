@@ -101,6 +101,16 @@ func init() {
 			Advanced: true,
 			Default:  "folders",
 		}, {
+			Name:     "regex_shows",
+			Help:     `please define the regex definition that will determine if a torrent should be classified as a show. Default: "(?i)(S[0-9]{2}|SEASON|COMPLETE|[0-9]+-[0-9]+)"`,
+			Advanced: true,
+			Default:  "(?i)(S[0-9]{2}|SEASON|COMPLETE|[0-9]+-[0-9]+)",
+		}, {
+			Name:     "regex_movies",
+			Help:     `please define the regex definition that will determine if a torrent should be classified as a movie. Default: "(?i)(19|20)([0-9]{2} ?\.?)"`,
+			Advanced: true,
+			Default:  `(?i)(19|20)([0-9]{2} ?\.?)`,
+		}, {
 			Name:     config.ConfigEncoding,
 			Help:     config.ConfigEncodingHelp,
 			Advanced: true,
@@ -115,6 +125,8 @@ func init() {
 
 // Options defines the configuration for this backend
 type Options struct {
+	RegexShows   string               `config:"regex_shows"`
+	RegexMovies  string               `config:"regex_movies"`
 	SharedFolder string               `config:"folder_mode"`
 	RootFolderID string               `config:"download_mode"`
 	APIKey       string               `config:"api_key"`
@@ -589,7 +601,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 		} else if f.opt.SharedFolder == "folders" && (dirID == "shows" || dirID == "movies" || dirID == "default") {
 			var artificialType []api.Item
 			if dirID == "shows" {
-				r, _ := regexp.Compile("(?i)(S[0-9]{2}|SEASON|COMPLETE)")
+				r, _ := regexp.Compile(f.opt.RegexShows) //(?i)(S[0-9]{2}|SEASON|COMPLETE)
 				for _, torrent := range torrents {
 					match := r.MatchString(torrent.Name)
 					if match {
@@ -598,8 +610,8 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 				}
 				result = artificialType
 			} else if dirID == "movies" {
-				r, _ := regexp.Compile(`(?i)([0-9]{4} ?\.?)`)
-				nr, _ := regexp.Compile("(?i)(S[0-9]{2}|SEASON|COMPLETE)")
+				r, _ := regexp.Compile(f.opt.RegexMovies) //`(?i)([0-9]{4} ?\.?)`
+				nr, _ := regexp.Compile(f.opt.RegexShows)
 				for _, torrent := range torrents {
 					match := r.MatchString(torrent.Name)
 					exclude := nr.MatchString(torrent.Name)
@@ -609,8 +621,8 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 				}
 				result = artificialType
 			} else {
-				r, _ := regexp.Compile(`(?i)([0-9]{4} ?\.?)`)
-				nr, _ := regexp.Compile("(?i)(S[0-9]{2}|SEASON|COMPLETE)")
+				r, _ := regexp.Compile(f.opt.RegexMovies)
+				nr, _ := regexp.Compile(f.opt.RegexShows)
 				for _, torrent := range torrents {
 					match := r.MatchString(torrent.Name)
 					exclude := nr.MatchString(torrent.Name)
