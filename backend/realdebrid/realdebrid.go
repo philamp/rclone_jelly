@@ -890,18 +890,6 @@ func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) error {
 	if err != nil {
 		return err
 	}
-	// need to check if empty as it will delete recursively by default
-	if check {
-		_, found, err := f.listAll(ctx, rootID, false, false, func(item *api.Item) bool {
-			return true
-		})
-		if err != nil {
-			return fmt.Errorf("purgeCheck: %w", err)
-		}
-		if found {
-			return fs.ErrorDirectoryNotEmpty
-		}
-	}
 	path := "/torrents/delete/" + rootID
 	opts := rest.Opts{
 		Method:     "DELETE",
@@ -914,16 +902,7 @@ func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) error {
 		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
 		return shouldRetry(ctx, resp, err)
 	})
-	//if err != nil {
-	//	return fmt.Errorf("rmdir failed: %w", err)
-	//}
-	//if err = result.AsErr(); err != nil {
-	//	return fmt.Errorf("rmdir: %w", err)
-	//}
 	f.dirCache.FlushDir(dir)
-	//if err != nil {
-	//	return err
-	//}
 	return nil
 }
 
@@ -1196,10 +1175,11 @@ func (f *Fs) remove(ctx context.Context, id ...string) (err error) {
 	}
 	var resp *http.Response
 	var result api.Response
-	err = f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
-		return shouldRetry(ctx, resp, err)
-	})
+	resp, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
+	if resp.StatusCode == 429 {
+		time.Sleep(time.Duration(2) * time.Second)
+		_, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
+	}
 	if f.opt.RootFolderID == "torrents" {
 		path = "/torrents/delete/" + id[1]
 		opts := rest.Opts{
@@ -1209,16 +1189,11 @@ func (f *Fs) remove(ctx context.Context, id ...string) (err error) {
 		}
 		var resp *http.Response
 		var result api.Response
-		err = f.pacer.Call(func() (bool, error) {
-			resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
-			return shouldRetry(ctx, resp, err)
-		})
-	}
-	if err != nil {
-		return nil //fmt.Errorf("remove http: %w", err)
-	}
-	if err = result.AsErr(); err != nil {
-		return nil //fmt.Errorf("remove: %w", err)
+		resp, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
+		if resp.StatusCode == 429 {
+			time.Sleep(time.Duration(2) * time.Second)
+			_, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
+		}
 	}
 	return nil
 }
