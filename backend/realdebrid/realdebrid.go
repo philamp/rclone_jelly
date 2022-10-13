@@ -497,36 +497,40 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			opts.Parameters.Set("includebreadcrumbs", "false")
 			opts.Parameters.Set("limit", "1")
 			var newcached []api.Item
-			err = f.pacer.Call(func() (bool, error) {
-				var totalcount int
-				var printed = false
-				totalcount = 2
-				for len(newcached) < totalcount {
+			var totalcount int
+			var printed = false
+			totalcount = 2
+			for len(newcached) < totalcount {
+				partialresult = nil
+				resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
+				var retries = 0
+				for resp.StatusCode == 429 && retries <= 5 {
 					partialresult = nil
+					time.Sleep(time.Duration(2) * time.Second)
 					resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
+					retries += 1
+				}
+				if err == nil {
+					totalcount, err = strconv.Atoi(resp.Header["X-Total-Count"][0])
 					if err == nil {
-						totalcount, err = strconv.Atoi(resp.Header["X-Total-Count"][0])
-						if err == nil {
-							if totalcount != len(cached) || time.Now().Unix()-lastcheck > interval {
-								if time.Now().Unix()-lastcheck > interval && !printed {
-									fmt.Println("Last update more than 15min ago. Updating links and torrents.")
-									printed = true
-								}
-								newcached = append(newcached, partialresult...)
-								opts.Parameters.Set("offset", strconv.Itoa(len(newcached)))
-								opts.Parameters.Set("limit", "100")
-							} else {
-								newcached = cached
+						if totalcount != len(cached) || time.Now().Unix()-lastcheck > interval {
+							if time.Now().Unix()-lastcheck > interval && !printed {
+								fmt.Println("Last update more than 15min ago. Updating links and torrents.")
+								printed = true
 							}
+							newcached = append(newcached, partialresult...)
+							opts.Parameters.Set("offset", strconv.Itoa(len(newcached)))
+							opts.Parameters.Set("limit", "2500")
 						} else {
-							break
+							newcached = cached
 						}
 					} else {
 						break
 					}
+				} else {
+					break
 				}
-				return shouldRetry(ctx, resp, err)
-			})
+			}
 			//fmt.Printf("Done.\n")
 			//fmt.Printf("Updating RealDebrid Torrents ... ")
 			cached = newcached
@@ -539,31 +543,34 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			}
 			opts.Parameters.Set("limit", "1")
 			var newtorrents []api.Item
-			err = f.pacer.Call(func() (bool, error) {
-				var totalcount int
-				totalcount = 2
-				for len(newtorrents) < totalcount {
+			totalcount = 2
+			for len(newtorrents) < totalcount {
+				partialresult = nil
+				resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
+				var retries = 0
+				for resp.StatusCode == 429 && retries <= 5 {
 					partialresult = nil
+					time.Sleep(time.Duration(2) * time.Second)
 					resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
+					retries += 1
+				}
+				if err == nil {
+					totalcount, err = strconv.Atoi(resp.Header["X-Total-Count"][0])
 					if err == nil {
-						totalcount, err = strconv.Atoi(resp.Header["X-Total-Count"][0])
-						if err == nil {
-							if totalcount != len(torrents) || time.Now().Unix()-lastcheck > interval {
-								newtorrents = append(newtorrents, partialresult...)
-								opts.Parameters.Set("offset", strconv.Itoa(len(newtorrents)))
-								opts.Parameters.Set("limit", "100")
-							} else {
-								newtorrents = torrents
-							}
+						if totalcount != len(torrents) || time.Now().Unix()-lastcheck > interval {
+							newtorrents = append(newtorrents, partialresult...)
+							opts.Parameters.Set("offset", strconv.Itoa(len(newtorrents)))
+							opts.Parameters.Set("limit", "2500")
 						} else {
-							break
+							newtorrents = torrents
 						}
 					} else {
 						break
 					}
+				} else {
+					break
 				}
-				return shouldRetry(ctx, resp, err)
-			})
+			}
 			lastcheck = time.Now().Unix()
 			//fmt.Printf("Done.\n")
 			torrents = newtorrents
@@ -667,9 +674,11 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 							broken = true
 							break
 						}
-						if resp.StatusCode == 429 {
+						var retries = 0
+						for resp.StatusCode == 429 && retries <= 5 {
 							time.Sleep(time.Duration(2) * time.Second)
 							resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
+							retries += 1
 						}
 					}
 					ItemFile.ParentID = torrent.ID
@@ -694,6 +703,12 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 							Parameters: f.baseParams(),
 						}
 						resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
+						var retries = 0
+						for resp.StatusCode == 429 && retries <= 5 {
+							time.Sleep(time.Duration(2) * time.Second)
+							resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
+							retries += 1
+						}
 						ItemFile.ParentID = torrent.ID
 						ItemFile.TorrentHash = torrent.TorrentHash
 						ItemFile.Generated = torrent.Generated
@@ -1144,7 +1159,8 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 					return nil, err
 				}
 			}
-			fmt.Println("Opening file revealed this link to be broken. Torrent will be re-downloaded on next refresh.")
+			fmt.Println("Error opening file: '" + o.url + "'.")
+			fmt.Println("This link seems to be broken. Torrent will be re-downloaded on next refresh.")
 			broken_torrents = append(broken_torrents, o.ParentID)
 		}
 		return nil, err
