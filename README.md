@@ -24,15 +24,14 @@ A potential use-case for this is serving the /torrent directory over plex, allow
 
 ## Installation:
 
-For Linux and Mac OSX, I will be providing cross-compiled releases. I dont own a mac and cant test the macos release, so please feel free to test it out.
-
 ### Windows:
 
 - install winfsp (https://winfsp.dev/)
 - download the latest pre-built 'rclone.exe' file from here: https://github.com/itsToggle/rclone_RD/releases
 
-### Mac OSX (untested build):
+### Mac OSX (community build):
 
+- I can't cross-compile for macOS, so I'm relying on you guys to compile and share the macOS releases :)
 - download the latest pre-built 'rclone-darwin' file from here: https://github.com/itsToggle/rclone_RD/releases
 
 ### Linux:
@@ -47,20 +46,22 @@ To add realdebrid as a remote, simply setup a realdebrid remote on your PC and c
 
 ## Setting up the remote (Every OS except android):
 
-1. create a new remote using: 'rclone config' - Depending on your OS this command might have to be '.\rclone config'
-2. choose a name for your remote e.g. 'your-remote'
-3. choose 'realdebrid' ('47')
-4. enter your realdebrid api key (https://real-debrid.com/apitoken)
-6. choose 'no advanced config'
-7. your RealDebrid remote is now set up.
-8. Mount the remote 'rclone cmount your-remote: your-destination:' - replace 'your-remote' with your remotes name. replace 'your-destination:' with a drive letter, e.g. 'X:' See the recommended tags section to speed up rclone!
-9. Enjoy!
+1. configure rclone by running the command 'rclone config' (could be './rclone config' and depending on your os, the filename could be './rclone-linux' or similar. If you get a permission denied error (linux & macos), run 'sudo chmod u+x rclone-linux', adjusted to the filename.)
+2. create a new remote by typing 'n'
+3. give your remote a name (e.g. 'your-remote')
+4. choose '47) realdebrid' as your remote type
+5. follow the rest of the prompted instructions, choose 'no advaced configuration'
+6. You can mount your newly created remote by running the command 'rclone cmount your-remote: X: --dir-cache-time 10s' (replace 'your-remote' with your remote name, replace 'X' with a drive letter of your choice or replace 'X:' with a destination folder)
+7. If you are running my rclone fork on Linux, replace "cmount" with "mount" in the command above.
+8. You've successfuly created a virtual drive of your debrid service!
+
+**You can run rclone as a background service by adding the mounting tag '--no-console' (Windows) or '--deamon' (Linux, Mac, etc).**
 
 ### Recommended Tags when mounting:
 
 It is recommended to use the tags in this example mounting command: 
 
-'rclone cmount torrents: Y: --dir-cache-time 10s --vfs-cache-mode full'
+'rclone mount torrents: Y: --dir-cache-time 10s'
 
 This will significantly speed up the mounted drive and detect changes faster.
 
