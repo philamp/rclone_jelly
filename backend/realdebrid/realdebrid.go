@@ -409,6 +409,29 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 		}
 	}
 	var selected_files_str = strings.Trim(strings.Join(strings.Fields(fmt.Sprint(selected_files)), ","), "[]")
+	//Delete old download links
+	for _, link := range torrent.Links {
+		for i, cachedfile := range cached {
+			if cachedfile.OriginalLink == link {
+				path = "/downloads/delete/" + cachedfile.ID
+				opts = rest.Opts{
+					Method:     "DELETE",
+					Path:       path,
+					Parameters: f.baseParams(),
+				}
+				var resp *http.Response
+				var result api.Response
+				var retries = 0
+				resp, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
+				for resp.StatusCode == 429 && retries <= 5 {
+					time.Sleep(time.Duration(2) * time.Second)
+					resp, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
+					retries += 1
+				}
+				cached[i].OriginalLink = "this-is-not-a-link"
+			}
+		}
+	}
 	//Add torrent again
 	path = "/torrents/addMagnet"
 	method = "POST"
@@ -1191,10 +1214,12 @@ func (f *Fs) remove(ctx context.Context, id ...string) (err error) {
 	}
 	var resp *http.Response
 	var result api.Response
+	var retries = 0
 	resp, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
-	if resp.StatusCode == 429 {
+	for resp.StatusCode == 429 && retries <= 5 {
 		time.Sleep(time.Duration(2) * time.Second)
-		_, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
+		resp, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
+		retries += 1
 	}
 	if f.opt.RootFolderID == "torrents" {
 		path = "/torrents/delete/" + id[1]
