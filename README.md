@@ -44,8 +44,9 @@ To add realdebrid as a remote, simply setup a realdebrid remote on your PC and c
 
 - download the latest pre-built 'apk' file from here: https://github.com/itsToggle/rclone_RD/releases
 
-## Setting up the remote (Every OS except android):
+## Setting up the remote:
 
+0. open a terminal in the download location of your rclone_rd file.
 1. configure rclone by running the command 'rclone config' (could be './rclone config' and depending on your os, the filename could be './rclone-linux' or similar. If you get a permission denied error (linux & macos), run 'sudo chmod u+x rclone-linux', adjusted to the filename.)
 2. create a new remote by typing 'n'
 3. give your remote a name (e.g. 'your-remote')
