@@ -1165,6 +1165,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	}
 	fs.FixRangeOption(options, o.size)
 	var resp *http.Response
+	var err_code = 0
 	opts := rest.Opts{
 		Path:    "",
 		RootURL: o.url,
@@ -1173,10 +1174,13 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	}
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = o.fs.srv.Call(ctx, &opts)
+		if resp != nil {
+			err_code = resp.StatusCode
+		}
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		if resp.StatusCode == 503 {
+		if err_code == 503 {
 			for _, TorrentID := range broken_torrents {
 				if o.ParentID == TorrentID {
 					return nil, err
