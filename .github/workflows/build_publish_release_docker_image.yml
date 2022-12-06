@@ -6,7 +6,7 @@ on:
 
 jobs:
     build:
-        if: github.repository == 'rclone/rclone'
+        if: github.repository == 'rclone/rclone' || 1 == 1
         runs-on: ubuntu-latest
         name: Build image job
         steps:
@@ -27,14 +27,14 @@ jobs:
               uses: ilteoood/docker_buildx@1.1.0
               with:
                 tag: latest,${{ steps.actual_patch_version.outputs.ACTUAL_PATCH_VERSION }},${{ steps.actual_minor_version.outputs.ACTUAL_MINOR_VERSION }},${{ steps.actual_major_version.outputs.ACTUAL_MAJOR_VERSION }}
-                imageName: rclone/rclone
+                imageName: rclone_rd
                 platform: linux/amd64,linux/386,linux/arm64,linux/arm/v7,linux/arm/v6
                 publish: true
                 dockerHubUser: ${{ secrets.DOCKER_HUB_USER }}
                 dockerHubPassword: ${{ secrets.DOCKER_HUB_PASSWORD }}
 
     build_docker_volume_plugin:
-        if: github.repository == 'rclone/rclone'
+        if: github.repository == 'rclone/rclone'  || 1 == 1
         needs: build
         runs-on: ubuntu-latest
         name: Build docker plugin job
