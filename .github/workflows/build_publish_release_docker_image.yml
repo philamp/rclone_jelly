@@ -58,7 +58,7 @@ jobs:
                 for PLUGIN_ARCH in amd64 arm64 arm/v7 arm/v6 ;do
                     export PLUGIN_USER PLUGIN_ARCH
                     make docker-plugin PLUGIN_TAG=${PLUGIN_ARCH/\//-}
-                    make docker-plugin PLUGIN_TAG=${PLUGIN_ARCH/\//-}-${VER#v}
+                    make docker-plugin PLUGIN_TAG=${PLUGIN_ARCH/\//-}-master
                 done
                 make docker-plugin PLUGIN_ARCH=amd64 PLUGIN_TAG=latest
-                make docker-plugin PLUGIN_ARCH=amd64 PLUGIN_TAG=${VER#v}
+                make docker-plugin PLUGIN_ARCH=amd64 PLUGIN_TAG=master
