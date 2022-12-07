@@ -24,6 +24,10 @@ A potential use-case for this is serving the /torrent directory over plex, allow
 
 ## Installation:
 
+### Docker:
+- check out https://hub.docker.com/repository/docker/itstoggle/docker-volume-rclone_rd for more information on the rclone_rd docker version
+- check out https://rclone.org/docker/ for more information on general usage
+
 ### Windows:
 
 - install winfsp (https://winfsp.dev/)
