@@ -12,7 +12,7 @@ maxFileLength = 255
 canWriteUnnormalized = true
 canReadUnnormalized   = true
 canReadRenormalized   = false
-canStream = false
+canStream = true
 */
 
 import (
@@ -1240,6 +1240,7 @@ func (f *Fs) remove(ctx context.Context, id ...string) (err error) {
 			_, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
 		}
 	}
+	lastcheck = time.Now().Unix() - interval
 	return nil
 }
 
