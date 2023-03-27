@@ -422,10 +422,17 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 				var resp *http.Response
 				var result api.Response
 				var retries = 0
+				var err_code = 0
 				resp, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
-				for resp.StatusCode == 429 && retries <= 5 {
+				if resp != nil {
+					err_code = resp.StatusCode
+				}
+				for err_code == 429 && retries <= 5 {
 					time.Sleep(time.Duration(2) * time.Second)
 					resp, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
+					if resp != nil {
+						err_code = resp.StatusCode
+					}
 					retries += 1
 				}
 				cached[i].OriginalLink = "this-is-not-a-link"
@@ -525,12 +532,19 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			totalcount = 2
 			for len(newcached) < totalcount {
 				partialresult = nil
+				var err_code = 0
 				resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
+				if resp != nil {
+					err_code = resp.StatusCode
+				}
 				var retries = 0
-				for resp.StatusCode == 429 && retries <= 5 {
+				for err_code == 429 && retries <= 5 {
 					partialresult = nil
 					time.Sleep(time.Duration(2) * time.Second)
 					resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
+					if resp != nil {
+						err_code = resp.StatusCode
+					}
 					retries += 1
 				}
 				if err == nil {
@@ -569,12 +583,19 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			totalcount = 2
 			for len(newtorrents) < totalcount {
 				partialresult = nil
+				var err_code = 0
 				resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
+				if resp != nil {
+					err_code = resp.StatusCode
+				}
 				var retries = 0
-				for resp.StatusCode == 429 && retries <= 5 {
+				for err_code == 429 && retries <= 5 {
 					partialresult = nil
 					time.Sleep(time.Duration(2) * time.Second)
 					resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
+					if resp != nil {
+						err_code = resp.StatusCode
+					}
 					retries += 1
 				}
 				if err == nil {
@@ -692,15 +713,22 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 							},
 							Parameters: f.baseParams(),
 						}
+						var err_code = 0
 						resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
-						if resp.StatusCode == 503 {
+						if resp != nil {
+							err_code = resp.StatusCode
+						}
+						if err_code == 503 {
 							broken = true
 							break
 						}
 						var retries = 0
-						for resp.StatusCode == 429 && retries <= 5 {
+						for err_code == 429 && retries <= 5 {
 							time.Sleep(time.Duration(2) * time.Second)
 							resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
+							if resp != nil {
+								err_code = resp.StatusCode
+							}
 							retries += 1
 						}
 					}
@@ -725,11 +753,18 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 							},
 							Parameters: f.baseParams(),
 						}
+						var err_code = 0
 						resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
+						if resp != nil {
+							err_code = resp.StatusCode
+						}
 						var retries = 0
-						for resp.StatusCode == 429 && retries <= 5 {
+						for err_code == 429 && retries <= 5 {
 							time.Sleep(time.Duration(2) * time.Second)
 							resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
+							if resp != nil {
+								err_code = resp.StatusCode
+							}
 							retries += 1
 						}
 						ItemFile.ParentID = torrent.ID
@@ -1219,10 +1254,17 @@ func (f *Fs) remove(ctx context.Context, id ...string) (err error) {
 	var resp *http.Response
 	var result api.Response
 	var retries = 0
+	var err_code = 0
 	resp, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
-	for resp.StatusCode == 429 && retries <= 5 {
+	if resp != nil {
+		err_code = resp.StatusCode
+	}
+	for err_code == 429 && retries <= 5 {
 		time.Sleep(time.Duration(2) * time.Second)
 		resp, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
+		if resp != nil {
+			err_code = resp.StatusCode
+		}
 		retries += 1
 	}
 	if f.opt.RootFolderID == "torrents" {
@@ -1234,8 +1276,12 @@ func (f *Fs) remove(ctx context.Context, id ...string) (err error) {
 		}
 		var resp *http.Response
 		var result api.Response
+		var err_code = 0
 		resp, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
-		if resp.StatusCode == 429 {
+		if resp != nil {
+			err_code = resp.StatusCode
+		}
+		if err_code == 429 {
 			time.Sleep(time.Duration(2) * time.Second)
 			_, _ = f.srv.CallJSON(ctx, &opts, nil, &result)
 		}
