@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 	"time"
+	"path/filepath"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/fserrors"
