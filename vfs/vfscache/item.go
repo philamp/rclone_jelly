@@ -68,6 +68,9 @@ type Item struct {
 	writeBackID     writeback.Handle         // id of any writebacks in progress
 	pendingAccesses int                      // number of threads - cache reset not allowed if not zero
 	beingReset      bool                     // cache cleaner is resetting the cache file, access not allowed
+
+	lastCheckTime    time.Time
+    	allowWrite       bool
 }
 
 // Info is persisted to backing store
