@@ -1320,7 +1320,7 @@ func (item *Item) WriteAtNoOverwrite(b []byte, off int64) (n int, skipped int, e
 	}
 	
 	// If the file check disallows writing, return without writing
-		if !item.allowWrite {
+	if !item.allowWrite {
 		return 0, 0, nil
 	}
 
