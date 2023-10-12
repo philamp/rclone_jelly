@@ -1316,7 +1316,7 @@ func (item *Item) WriteAtNoOverwrite(b []byte, off int64) (n int, skipped int, e
 		emptyFilePath := filepath.Join(cacheDonePath, item.name)
 		fileInfo, err := os.Stat(emptyFilePath)
 		// If the file exists and is empty, set allowWrite to false
-		item.allowWrite = err != nil
+		item.allowWrite = os.IsNotExist(err)
 	}
 	
 	// If the file check disallows writing, return without writing
