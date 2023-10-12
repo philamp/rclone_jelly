@@ -70,8 +70,8 @@ type Item struct {
 	pendingAccesses int                      // number of threads - cache reset not allowed if not zero
 	beingReset      bool                     // cache cleaner is resetting the cache file, access not allowed
 
-	lastCheckTime    time.Time
-    	allowWrite       bool
+	lastCheckTime    time.Time               // last time check was done on fs
+    	allowWrite       bool                    // when file exists, allowWrite is False
 }
 
 // Info is persisted to backing store
@@ -1303,6 +1303,28 @@ func (item *Item) WriteAt(b []byte, off int64) (n int, err error) {
 // It returns n the total bytes processed and skipped the number of
 // bytes which were processed but not actually written to the file.
 func (item *Item) WriteAtNoOverwrite(b []byte, off int64) (n int, skipped int, err error) {
+
+	cacheDonePath := "/jellygrail/cache_check"
+
+	currentTime := time.Now()
+	// Check if we should recheck the file presence, i.e., 
+	// if it hasn't been checked yet or if it's been over 2 seconds since the last check
+	shouldRecheck := item.lastCheckTime.IsZero() || currentTime.Sub(item.lastCheckTime) > 2*time.Second
+	
+	if shouldRecheck {
+		item.lastCheckTime = currentTime
+		emptyFilePath := filepath.Join(cacheDonePath, item.name)
+		fileInfo, err := os.Stat(emptyFilePath)
+		// If the file exists and is empty, set allowWrite to false
+		item.allowWrite = err != nil
+	}
+	
+	// If the file check disallows writing, return without writing
+		if !item.allowWrite {
+		return 0, 0, nil
+	}
+
+	
 	item.mu.Lock()
 
 	var (
