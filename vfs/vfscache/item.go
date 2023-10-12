@@ -1309,10 +1309,11 @@ func (item *Item) WriteAtNoOverwrite(b []byte, off int64) (n int, skipped int, e
 	currentTime := time.Now()
 	// Check if we should recheck the file presence, i.e., 
 	// if it hasn't been checked yet or if it's been over 2 seconds since the last check
-	shouldRecheck := item.lastCheckTime.IsZero() || currentTime.Sub(item.lastCheckTime) > 2*time.Second
+	shouldRecheck := item.lastCheckTime.IsZero() || currentTime.Sub(item.lastCheckTime) > 3*time.Second
 	
 	if shouldRecheck {
 		item.lastCheckTime = currentTime
+		fs.Debugf("vfs cache: ITEM NAME : %s", item.name)
 		emptyFilePath := filepath.Join(cacheDonePath, item.name)
 		fileInfo, err := os.Stat(emptyFilePath)
 		// If the file exists and is empty, set allowWrite to false
