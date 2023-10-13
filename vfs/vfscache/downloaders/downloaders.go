@@ -489,6 +489,14 @@ loop:
 	}
 
 	n, skipped, err := dl.dls.item.WriteAtNoOverwrite(p, dl.offset)
+
+	if err != nil {
+		if errors.Is(err, vfscache.ErrWriteSkipped) {
+			fs.Debugf(dl.dls.src, "vfs cache: write skipped intentionally due to external file presence")
+			return n, nil // or adjust as needed
+		} 
+	}
+	
 	if skipped == n {
 		dl.skipped += int64(skipped)
 	} else {
