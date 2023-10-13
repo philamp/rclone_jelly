@@ -99,7 +99,10 @@ const (
 	ResetFailed                             // Reset failed with an error
 	ResetComplete                           // Reset completed successfully
 )
-
+var (
+	ErrWriteSkipped = errors.New("write skipped due to allowWrite flag")
+)
+	
 func (rr ResetResult) String() string {
 	return [...]string{"Dirty item skipped", "In-access item skipped", "Empty item skipped",
 		"Not-in-use item removed", "Item reset failed", "Item reset completed"}[rr]
@@ -1323,7 +1326,7 @@ func (item *Item) WriteAtNoOverwrite(b []byte, off int64) (n int, skipped int, e
 	
 	// If the file check disallows writing, return without writing
 	if !item.allowWrite {
-		return 0, 0, nil
+		return 0, 0, ErrWriteSkipped
 	}
 
 	
