@@ -1271,14 +1271,19 @@ func (item *Item) WriteAt(b []byte, off int64) (n int, err error) {
 		item.mu.Unlock()
 		return 0, errors.New("vfs cache item WriteAt: internal error: didn't Open file")
 	}
-	item.mu.Unlock()
-	// Do the writing with Item.mu unlocked
-	n, err = item.fd.WriteAt(b, off)
-	if err == nil && n != len(b) {
-		err = fmt.Errorf("short write: tried to write %d but only %d written", len(b), n)
+	if item.allowWrite{
+		item.mu.Unlock()
+		// Do the writing with Item.mu unlocked
+		n, err = item.fd.WriteAt(b, off)
+		if err == nil && n != len(b) {
+			err = fmt.Errorf("short write: tried to write %d but only %d written", len(b), n)
+		}
+		item.mu.Lock()
+		item._written(off, int64(n))
+	}else{
+		// we fool it like it was written, maybe not efficient later on .... have to test it
+		n = len(b) 
 	}
-	item.mu.Lock()
-	item._written(off, int64(n))
 	if n > 0 {
 		item._dirty()
 	}
@@ -1361,13 +1366,15 @@ func (item *Item) WriteAtNoOverwrite(b []byte, off int64) (n int, skipped int, e
 			// if range not present then we want to write it
 			// fs.Debugf(item.name, "write chunk offset=%d size=%d", off, size)
 			// better solution to avoid writting ?
+			
+			nn, err = item.fd.WriteAt(b[:size], off)
+			if err == nil && nn != size {
+				err = fmt.Errorf("downloader: short write: tried to write %d but only %d written", size, nn)
+			}
 			if item.allowWrite {
-				nn, err = item.fd.WriteAt(b[:size], off)
-				if err == nil && nn != size {
-					err = fmt.Errorf("downloader: short write: tried to write %d but only %d written", size, nn)
-				}
 				item._written(off, int64(nn))
 			}
+			
 		}
 		off += int64(nn)
 		b = b[nn:]
