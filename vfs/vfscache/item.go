@@ -1316,7 +1316,7 @@ func (item *Item) WriteAtNoOverwrite(b []byte, off int64) (n int, skipped int, e
 		fs.Debugf("vfs cache: ITEM NAME : %s", item.name)
 		emptyFilePath := filepath.Join(cacheDonePath, item.name)
 		fs.Debugf("vfs cache: ITEM PATH CHECKED IS : %s", emptyFilePath)
-		fileInfo, err := os.Stat(emptyFilePath)
+		_, err := os.Stat(emptyFilePath)
 		// If the file exists and is empty, set allowWrite to false
 		item.allowWrite = os.IsNotExist(err)
 	}
