@@ -1325,9 +1325,10 @@ func (item *Item) WriteAtNoOverwrite(b []byte, off int64) (n int, skipped int, e
 	}
 	
 	// If the file check disallows writing, return without writing
-	if !item.allowWrite {
-		return 0, 0, ErrWriteSkipped
-	}
+	// solution removed in favor of the below solution 
+	// if !item.allowWrite {
+		// return 0, 0, ErrWriteSkipped
+	// }
 
 	
 	item.mu.Lock()
@@ -1359,11 +1360,14 @@ func (item *Item) WriteAtNoOverwrite(b []byte, off int64) (n int, skipped int, e
 		} else {
 			// if range not present then we want to write it
 			// fs.Debugf(item.name, "write chunk offset=%d size=%d", off, size)
-			nn, err = item.fd.WriteAt(b[:size], off)
-			if err == nil && nn != size {
-				err = fmt.Errorf("downloader: short write: tried to write %d but only %d written", size, nn)
+			// better solution to avoid writting ?
+			if item.allowWrite {
+				nn, err = item.fd.WriteAt(b[:size], off)
+				if err == nil && nn != size {
+					err = fmt.Errorf("downloader: short write: tried to write %d but only %d written", size, nn)
+				}
+				item._written(off, int64(nn))
 			}
-			item._written(off, int64(nn))
 		}
 		off += int64(nn)
 		b = b[nn:]
