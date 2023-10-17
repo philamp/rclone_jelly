@@ -1271,19 +1271,16 @@ func (item *Item) WriteAt(b []byte, off int64) (n int, err error) {
 		item.mu.Unlock()
 		return 0, errors.New("vfs cache item WriteAt: internal error: didn't Open file")
 	}
-	if item.allowWrite{
-		item.mu.Unlock()
-		// Do the writing with Item.mu unlocked
-		n, err = item.fd.WriteAt(b, off)
-		if err == nil && n != len(b) {
-			err = fmt.Errorf("short write: tried to write %d but only %d written", len(b), n)
-		}
-		item.mu.Lock()
-		item._written(off, int64(n))
-	}else{
-		// we fool it like it was written, maybe not efficient later on .... have to test it
-		n = len(b) 
+
+	item.mu.Unlock()
+	// Do the writing with Item.mu unlocked
+	n, err = item.fd.WriteAt(b, off)
+	if err == nil && n != len(b) {
+		err = fmt.Errorf("short write: tried to write %d but only %d written", len(b), n)
 	}
+	item.mu.Lock()
+	item._written(off, int64(n))
+
 	if n > 0 {
 		item._dirty()
 	}
@@ -1371,9 +1368,9 @@ func (item *Item) WriteAtNoOverwrite(b []byte, off int64) (n int, skipped int, e
 			if err == nil && nn != size {
 				err = fmt.Errorf("downloader: short write: tried to write %d but only %d written", size, nn)
 			}
-			if item.allowWrite {
-				item._written(off, int64(nn))
-			}
+			
+			item._written(off, int64(nn))
+			
 			
 		}
 		off += int64(nn)
