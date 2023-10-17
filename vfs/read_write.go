@@ -61,10 +61,29 @@ type RWFileHandle struct {
 	
 }
 
+// Check interfaces
+var (
+	_ io.Reader   = (*RWFileHandle)(nil)
+	_ io.ReaderAt = (*RWFileHandle)(nil)
+	_ io.Seeker   = (*RWFileHandle)(nil)
+	_ io.Closer   = (*RWFileHandle)(nil)
+)
+
 func newRWFileHandle(d *Dir, f *File, flags int) (fh *RWFileHandle, err error) {
+	var mhash *hash.MultiHasher
+	var err error
+	o := f.getObject()
 	defer log.Trace(f.Path(), "")("err=%v", &err)
 	// get an item to represent this from the cache
 	item := d.vfs.cache.Item(f.Path())
+
+	if !f.VFS().Opt.NoChecksum {
+		hashes := hash.NewHashSet(o.Fs().Hashes().GetOne()) // just pick one hash
+		mhash, err = hash.NewMultiHasherTypes(hashes)
+		if err != nil {
+			fs.Errorf(o.Fs(), "newReadFileHandle hash error: %v", err)
+		}
+	}
 
 	exists := f.exists() || (item.Exists() && !item.WrittenBack())
 
@@ -78,6 +97,14 @@ func newRWFileHandle(d *Dir, f *File, flags int) (fh *RWFileHandle, err error) {
 		d:     d,
 		flags: flags,
 		item:  item,
+
+		// from read.go
+		remote:      o.Remote(),
+		noSeek:      f.VFS().Opt.NoSeek,
+		// file:        f,
+		hash:        mhash,
+		size:        nonNegative(o.Size()),
+		sizeUnknown: o.Size() < 0,
 	}
 
 	// truncate immediately if O_TRUNC is set or O_CREATE is set and file doesn't exist
@@ -94,6 +121,8 @@ func newRWFileHandle(d *Dir, f *File, flags int) (fh *RWFileHandle, err error) {
 		fh.file.addWriter(fh)
 	}
 
+	// from read.go :
+	fh.cond = sync.NewCond(&fh.mu) 
 	return fh, nil
 }
 
