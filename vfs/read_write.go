@@ -9,6 +9,17 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/log"
 	"github.com/rclone/rclone/vfs/vfscache"
+
+
+
+	// delta from read.go
+	"context"
+	"errors"
+	"time"
+
+	"github.com/rclone/rclone/fs/accounting"
+	"github.com/rclone/rclone/fs/chunkedreader"
+	"github.com/rclone/rclone/fs/hash"
 )
 
 // RWFileHandle is a handle that can be open for read and write.
@@ -16,6 +27,8 @@ import (
 // It will be open to a temporary file which, when closed, will be
 // transferred to the remote.
 type RWFileHandle struct {
+	baseHandle
+	
 	// read only variables
 	file  *File
 	d     *Dir
@@ -28,6 +41,24 @@ type RWFileHandle struct {
 	closed      bool  // set if handle has been closed
 	opened      bool
 	writeCalled bool // if any Write() methods have been called
+
+
+	done        func(ctx context.Context, err error)
+	// mu          sync.Mutex
+	cond        *sync.Cond // cond lock for out of sequence reads
+	// closed      bool       // set if handle has been closed
+	r           *accounting.Account
+	readCalled  bool  // set if read has been called
+	size        int64 // size of the object (0 for unknown length)
+	// offset      int64 // offset of read of o
+	roffset     int64 // offset of Read() calls
+	noSeek      bool
+	sizeUnknown bool // set if size of source is not known
+	// file        *File
+	hash        *hash.MultiHasher
+	// opened      bool
+	remote      string
+	
 }
 
 func newRWFileHandle(d *Dir, f *File, flags int) (fh *RWFileHandle, err error) {
