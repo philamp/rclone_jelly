@@ -1300,6 +1300,31 @@ func (item *Item) WriteAt(b []byte, off int64) (n int, err error) {
 	return n, err
 }
 
+// jellgrail fork AWU, to know if the RW must be in source mode (allowWrite = false) or in cache mode (allowWrite = true)
+// TODO : we don't need shouldrecheck once allowWrite is false (but if it is not defined the first time, how to check it ?)
+// TODO : if allowWrite is false, check deeper if we need to be in source mode or in cache mode (in the calling function by checking if offset requested is within downloaded ranges, if so, switch in cache mode)
+
+func (item *Item) AllowWriteUpdate() {
+	cacheDonePath := "/jellygrail/cache_check"
+
+	currentTime := time.Now()
+	// Check if we should recheck the file presence, i.e.,
+	// if it hasn't been checked yet or if it's been over 3 seconds since the last check
+	shouldRecheck := item.lastCheckTime.IsZero() || currentTime.Sub(item.lastCheckTime) > 3*time.Second
+
+	if shouldRecheck {
+		item.lastCheckTime = currentTime
+		fs.Debugf("vfs cache: ITEM NAME : %s", item.name) // assuming fs is your logging package
+		emptyFilePath := filepath.Join(cacheDonePath, item.name)
+		fs.Debugf("vfs cache: ITEM PATH CHECKED IS : %s", emptyFilePath)
+		_, err := os.Stat(emptyFilePath)
+		// If the file exists and is empty, set allowWrite to false
+		item.allowWrite = !os.IsNotExist(err)
+	}
+	// handle other logic or errors as needed
+}
+
+
 // WriteAtNoOverwrite writes b to the file, but will not overwrite
 // already present ranges.
 //
@@ -1308,23 +1333,6 @@ func (item *Item) WriteAt(b []byte, off int64) (n int, err error) {
 // It returns n the total bytes processed and skipped the number of
 // bytes which were processed but not actually written to the file.
 func (item *Item) WriteAtNoOverwrite(b []byte, off int64) (n int, skipped int, err error) {
-
-	cacheDonePath := "/jellygrail/cache_check"
-
-	currentTime := time.Now()
-	// Check if we should recheck the file presence, i.e., 
-	// if it hasn't been checked yet or if it's been over 2 seconds since the last check
-	shouldRecheck := item.lastCheckTime.IsZero() || currentTime.Sub(item.lastCheckTime) > 3*time.Second
-	
-	if shouldRecheck {
-		item.lastCheckTime = currentTime
-		fs.Debugf("vfs cache: ITEM NAME : %s", item.name)
-		emptyFilePath := filepath.Join(cacheDonePath, item.name)
-		fs.Debugf("vfs cache: ITEM PATH CHECKED IS : %s", emptyFilePath)
-		_, err := os.Stat(emptyFilePath)
-		// If the file exists and is empty, set allowWrite to false
-		item.allowWrite = os.IsNotExist(err)
-	}
 	
 	// If the file check disallows writing, return without writing
 	// solution removed in favor of the below solution 
