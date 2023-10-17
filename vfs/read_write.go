@@ -166,6 +166,26 @@ func (fh *RWFileHandle) openPending() (err error) {
 	return nil
 }
 
+// from read.go, append with "Source"
+// openPending opens the file if there is a pending open
+// call with the lock held
+func (fh *ReadFileHandle) openPendingSource() (err error) {
+	if fh.opened {
+		return nil
+	}
+	o := fh.file.getObject()
+	r, err := chunkedreader.New(context.TODO(), o, int64(fh.file.VFS().Opt.ChunkSize), int64(fh.file.VFS().Opt.ChunkSizeLimit)).Open()
+	if err != nil {
+		return err
+	}
+	tr := accounting.GlobalStats().NewTransfer(o)
+	fh.done = tr.Done
+	fh.r = tr.Account(context.TODO(), r).WithBuffer() // account the transfer
+	fh.opened = true
+
+	return nil
+}
+
 // String converts it to printable
 func (fh *RWFileHandle) String() string {
 	if fh == nil {
