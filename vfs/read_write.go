@@ -187,6 +187,7 @@ func (fh *ReadFileHandle) openPendingSource() (err error) {
 }
 
 // String converts it to printable
+// we keep this version, no read.go import here
 func (fh *RWFileHandle) String() string {
 	if fh == nil {
 		return "<nil *RWFileHandle>"
@@ -198,6 +199,7 @@ func (fh *RWFileHandle) String() string {
 }
 
 // Node returns the Node associated with this - satisfies Noder interface
+// we keep this version, no read.go import here
 func (fh *RWFileHandle) Node() Node {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
