@@ -71,7 +71,7 @@ type Item struct {
 	beingReset      bool                     // cache cleaner is resetting the cache file, access not allowed
 
 	lastCheckTime    time.Time               // last time check was done on fs
-    	allowWrite       bool                    // when file exists, allowWrite is False
+    	allowDirectRead       bool                    // when file exists, allowDirectRead is True
 }
 
 // Info is persisted to backing store
