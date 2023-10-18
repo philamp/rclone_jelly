@@ -1304,7 +1304,7 @@ func (item *Item) WriteAt(b []byte, off int64) (n int, err error) {
 // TODO : we don't need shouldrecheck once allowWrite is false (but if it is not defined the first time, how to check it ?)
 // TODO : if allowWrite is false, check deeper if we need to be in source mode or in cache mode (in the calling function by checking if offset requested is within downloaded ranges, if so, switch in cache mode)
 
-func (item *Item) AllowWriteUpdate() {
+func (item *Item) AllowDirectReadUpdate() bool {
 	cacheDonePath := "/jellygrail/cache_check"
 
 	currentTime := time.Now()
@@ -1319,9 +1319,10 @@ func (item *Item) AllowWriteUpdate() {
 		fs.Debugf("vfs cache: ITEM PATH CHECKED IS : %s", emptyFilePath)
 		_, err := os.Stat(emptyFilePath)
 		// If the file exists and is empty, set allowWrite to false
-		item.allowWrite = !os.IsNotExist(err)
+		item.allowDirectRead = !os.IsNotExist(err)
 	}
 	// handle other logic or errors as needed
+	return item.allowDirectRead
 }
 
 
