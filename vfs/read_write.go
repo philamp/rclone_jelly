@@ -355,6 +355,38 @@ func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool) (n int, err e
 	return n, err
 }
 
+func waitSequential(what string, remote string, cond *sync.Cond, maxWait time.Duration, poff *int64, off int64) {
+	var (
+		timeout = time.NewTimer(maxWait)
+		done    = make(chan struct{})
+		abort   = false
+	)
+	go func() {
+		select {
+		case <-timeout.C:
+			// take the lock to make sure that cond.Wait() is called before
+			// cond.Broadcast. NB cond.L == mu
+			cond.L.Lock()
+			// set abort flag and give all the waiting goroutines a kick on timeout
+			abort = true
+			fs.Debugf(remote, "aborting in-sequence %s wait, off=%d", what, off)
+			cond.Broadcast()
+			cond.L.Unlock()
+		case <-done:
+		}
+	}()
+	for *poff != off && !abort {
+		fs.Debugf(remote, "waiting for in-sequence %s to %d for %v", what, off, maxWait)
+		cond.Wait()
+	}
+	// tidy up end timer
+	close(done)
+	timeout.Stop()
+	if *poff != off {
+		fs.Debugf(remote, "failed to wait for in-sequence %s to %d", what, off)
+	}
+}
+
 // added from read.go and renamed with +Source
 func (fh *RWFileHandle) readAtSource(p []byte, off int64) (n int, err error) {
 	// defer log.Trace(fh.remote, "p[%d], off=%d", len(p), off)("n=%d, err=%v", &n, &err)
