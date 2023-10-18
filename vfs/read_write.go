@@ -356,9 +356,9 @@ func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool) (n int, err e
 }
 
 // added from read.go and renamed with +Source
-func (fh *ReadFileHandle) readAtSource(p []byte, off int64) (n int, err error) {
+func (fh *RWFileHandle) readAtSource(p []byte, off int64) (n int, err error) {
 	// defer log.Trace(fh.remote, "p[%d], off=%d", len(p), off)("n=%d, err=%v", &n, &err)
-	err = fh.openPending() // FIXME pending open could be more efficient in the presence of seek (and retries)
+	err = fh.openPendingSource() // FIXME pending open could be more efficient in the presence of seek (and retries)
 	if err != nil {
 		return 0, err
 	}
