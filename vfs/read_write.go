@@ -320,6 +320,8 @@ func (fh *RWFileHandle) Flush() error {
 	
 		// fs.Debugf(fh.remote, "ReadFileHandle.Flush OK")
 		return nil
+
+	}
 		
 }
 
