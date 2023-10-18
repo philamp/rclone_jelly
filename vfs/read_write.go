@@ -73,7 +73,6 @@ var (
 
 func newRWFileHandle(d *Dir, f *File, flags int) (fh *RWFileHandle, err error) {
 	var mhash *hash.MultiHasher
-	var err error
 	o := f.getObject()
 	defer log.Trace(f.Path(), "")("err=%v", &err)
 	// get an item to represent this from the cache
@@ -459,7 +458,7 @@ func (fh *RWFileHandle) checkHash() error {
 	return nil
 }
 
-func waitSequential(what string, remote string, cond *sync.Cond, maxWait time.Duration, poff *int64, off int64) {
+func waitSequentialSource(what string, remote string, cond *sync.Cond, maxWait time.Duration, poff *int64, off int64) {
 	var (
 		timeout = time.NewTimer(maxWait)
 		done    = make(chan struct{})
@@ -561,7 +560,7 @@ func (fh *RWFileHandle) readAtSource(p []byte, off int64) (n int, err error) {
 		maxBuf = len(p)
 	}
 	if gap := off - fh.offset; gap > 0 && gap < int64(8*maxBuf) {
-		waitSequential("read", fh.remote, fh.cond, fh.file.VFS().Opt.ReadWait, &fh.offset, off)
+		waitSequentialSource("read", fh.remote, fh.cond, fh.file.VFS().Opt.ReadWait, &fh.offset, off)
 	}
 	doSeek := off != fh.offset
 	if doSeek && fh.noSeek {
