@@ -253,6 +253,31 @@ func (fh *RWFileHandle) close() (err error) {
 	return err
 }
 
+func (fh *RWFileHandle) closeSource() error {
+	if fh.closed {
+		return ECLOSED
+	}
+	fh.closed = true
+
+	if fh.opened {
+		var err error
+		defer func() {
+			fh.done(context.TODO(), err)
+		}()
+		// Close first so that we have hashes
+		err = fh.r.Close()
+		if err != nil {
+			return err
+		}
+		// Now check the hash
+		err = fh.checkHash()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Close closes the file
 func (fh *RWFileHandle) Close() error {
 	fh.mu.Lock()
@@ -542,8 +567,10 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
 	if(!fh.item.AllowDirectReadUpdate()){
+		fh.currentDirectReadMode = false
 		return fh._readAt(b, off, true)
 	}else{
+		fh.currentDirectReadMode = true
 		return fh.readAtSource(p, off)
 	}
 }
@@ -554,13 +581,13 @@ func (fh *RWFileHandle) Read(b []byte) (n int, err error) {
 	defer fh.mu.Unlock()
 
 	if(!fh.item.AllowDirectReadUpdate()){
-	
+		fh.currentDirectReadMode = false
 		n, err = fh._readAt(b, fh.offset, false)
 		fh.offset += int64(n)
 		return n, err
 
 	}else{
-
+		fh.currentDirectReadMode = true
 		if fh.roffset >= fh.size && !fh.sizeUnknown {
 			return 0, io.EOF
 		}
