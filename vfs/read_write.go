@@ -356,10 +356,15 @@ func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool) (n int, err e
 }
 
 // ReadAt bytes from the file at off
+// merged with ReadAt from read.go
 func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
-	return fh._readAt(b, off, true)
+	if(!fh.item.AllowDirectReadUpdate()){
+		return fh._readAt(b, off, true)
+	}else{
+		return fh.readAt(p, off)
+	}
 }
 
 // Read bytes from the file
