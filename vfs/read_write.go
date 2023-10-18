@@ -649,7 +649,7 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 		return fh._readAt(b, off, true)
 	}else{
 		fh.currentDirectReadMode = true
-		return fh.readAtSource(p, off)
+		return fh.readAtSource(b, off)
 	}
 }
 
@@ -669,7 +669,7 @@ func (fh *RWFileHandle) Read(b []byte) (n int, err error) {
 		if fh.roffset >= fh.size && !fh.sizeUnknown {
 			return 0, io.EOF
 		}
-		n, err = fh.readAtSource(p, fh.roffset)
+		n, err = fh.readAtSource(b, fh.roffset)
 		fh.roffset += int64(n)
 		return n, err
 
