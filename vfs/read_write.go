@@ -372,27 +372,49 @@ func (fh *RWFileHandle) Read(b []byte) (n int, err error) {
 }
 
 // Seek to new file position
+// merged with Seek from read.go
 func (fh *RWFileHandle) Seek(offset int64, whence int) (ret int64, err error) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
-	if fh.closed {
-		return 0, ECLOSED
+
+	if(!fh.currentDirectReadMode){
+	
+		if fh.closed {
+			return 0, ECLOSED
+		}
+		if !fh.opened && offset == 0 && whence != 2 {
+			return 0, nil
+		}
+		if err = fh.openPending(); err != nil {
+			return ret, err
+		}
+		switch whence {
+		case io.SeekStart:
+			fh.offset = 0
+		case io.SeekEnd:
+			fh.offset = fh._size()
+		}
+		fh.offset += offset
+		// we don't check the offset - the next Read will
+		return fh.offset, nil
+
+	}else{
+		// from read.go
+		if fh.noSeek {
+			return 0, ESPIPE
+		}
+		size := fh.size
+		switch whence {
+		case io.SeekStart:
+			fh.roffset = 0
+		case io.SeekEnd:
+			fh.roffset = size
+		}
+		fh.roffset += offset
+		// we don't check the offset - the next Read will
+		return fh.roffset, nil
 	}
-	if !fh.opened && offset == 0 && whence != 2 {
-		return 0, nil
-	}
-	if err = fh.openPending(); err != nil {
-		return ret, err
-	}
-	switch whence {
-	case io.SeekStart:
-		fh.offset = 0
-	case io.SeekEnd:
-		fh.offset = fh._size()
-	}
-	fh.offset += offset
-	// we don't check the offset - the next Read will
-	return fh.offset, nil
+	
 }
 
 // _writeAt bytes to the file at off
