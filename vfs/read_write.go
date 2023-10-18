@@ -387,6 +387,59 @@ func waitSequential(what string, remote string, cond *sync.Cond, maxWait time.Du
 	}
 }
 
+func (fh *RWFileHandle) seek(offset int64, reopen bool) (err error) {
+	if fh.noSeek {
+		return ESPIPE
+	}
+	fh.hash = nil
+	if !reopen {
+		ar := fh.r.GetAsyncReader()
+		// try to fulfill the seek with buffer discard
+		if ar != nil && ar.SkipBytes(int(offset-fh.offset)) {
+			fh.offset = offset
+			return nil
+		}
+	}
+	fh.r.StopBuffering() // stop the background reading first
+	oldReader := fh.r.GetReader()
+	r, ok := oldReader.(*chunkedreader.ChunkedReader)
+	if !ok {
+		fs.Logf(fh.remote, "ReadFileHandle.Read expected reader to be a ChunkedReader, got %T", oldReader)
+		reopen = true
+	}
+	if !reopen {
+		fs.Debugf(fh.remote, "ReadFileHandle.seek from %d to %d (fs.RangeSeeker)", fh.offset, offset)
+		_, err = r.RangeSeek(context.TODO(), offset, io.SeekStart, -1)
+		if err != nil {
+			fs.Debugf(fh.remote, "ReadFileHandle.Read fs.RangeSeeker failed: %v", err)
+			return err
+		}
+	} else {
+		fs.Debugf(fh.remote, "ReadFileHandle.seek from %d to %d", fh.offset, offset)
+		// close old one
+		err = oldReader.Close()
+		if err != nil {
+			fs.Debugf(fh.remote, "ReadFileHandle.Read seek close old failed: %v", err)
+		}
+		// re-open with a seek
+		o := fh.file.getObject()
+		r = chunkedreader.New(context.TODO(), o, int64(fh.file.VFS().Opt.ChunkSize), int64(fh.file.VFS().Opt.ChunkSizeLimit))
+		_, err := r.Seek(offset, 0)
+		if err != nil {
+			fs.Debugf(fh.remote, "ReadFileHandle.Read seek failed: %v", err)
+			return err
+		}
+		r, err = r.Open()
+		if err != nil {
+			fs.Debugf(fh.remote, "ReadFileHandle.Read seek failed: %v", err)
+			return err
+		}
+	}
+	fh.r.UpdateReader(context.TODO(), r)
+	fh.offset = offset
+	return nil
+}
+
 // added from read.go and renamed with +Source
 func (fh *RWFileHandle) readAtSource(p []byte, off int64) (n int, err error) {
 	// defer log.Trace(fh.remote, "p[%d], off=%d", len(p), off)("n=%d, err=%v", &n, &err)
