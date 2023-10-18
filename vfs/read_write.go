@@ -355,6 +355,102 @@ func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool) (n int, err e
 	return n, err
 }
 
+// added from read.go and renamed with +Source
+func (fh *ReadFileHandle) readAtSource(p []byte, off int64) (n int, err error) {
+	// defer log.Trace(fh.remote, "p[%d], off=%d", len(p), off)("n=%d, err=%v", &n, &err)
+	err = fh.openPending() // FIXME pending open could be more efficient in the presence of seek (and retries)
+	if err != nil {
+		return 0, err
+	}
+	// fs.Debugf(fh.remote, "ReadFileHandle.Read size %d offset %d", reqSize, off)
+	if fh.closed {
+		fs.Errorf(fh.remote, "ReadFileHandle.Read error: %v", EBADF)
+		return 0, ECLOSED
+	}
+	maxBuf := 1024 * 1024
+	if len(p) < maxBuf {
+		maxBuf = len(p)
+	}
+	if gap := off - fh.offset; gap > 0 && gap < int64(8*maxBuf) {
+		waitSequential("read", fh.remote, fh.cond, fh.file.VFS().Opt.ReadWait, &fh.offset, off)
+	}
+	doSeek := off != fh.offset
+	if doSeek && fh.noSeek {
+		return 0, ESPIPE
+	}
+	var newOffset int64
+	retries := 0
+	reqSize := len(p)
+	doReopen := false
+	lowLevelRetries := fs.GetConfig(context.TODO()).LowLevelRetries
+	for {
+		if doSeek {
+			// Are we attempting to seek beyond the end of the
+			// file - if so just return EOF leaving the underlying
+			// file in an unchanged state.
+			if off >= fh.size {
+				fs.Debugf(fh.remote, "ReadFileHandle.Read attempt to read beyond end of file: %d > %d", off, fh.size)
+				return 0, io.EOF
+			}
+			// Otherwise do the seek
+			err = fh.seek(off, doReopen)
+		} else {
+			err = nil
+		}
+		if err == nil {
+			if reqSize > 0 {
+				fh.readCalled = true
+			}
+			n, err = io.ReadFull(fh.r, p)
+			newOffset = fh.offset + int64(n)
+			// if err == nil && rand.Intn(10) == 0 {
+			// 	err = errors.New("random error")
+			// }
+			if err == nil {
+				break
+			} else if (err == io.ErrUnexpectedEOF || err == io.EOF) && (newOffset == fh.size || fh.sizeUnknown) {
+				if fh.sizeUnknown {
+					// size is now known since we have read to the end
+					fh.sizeUnknown = false
+					fh.size = newOffset
+				}
+				// Have read to end of file - reset error
+				err = nil
+				break
+			}
+		}
+		if retries >= lowLevelRetries {
+			break
+		}
+		retries++
+		fs.Errorf(fh.remote, "ReadFileHandle.Read error: low level retry %d/%d: %v", retries, lowLevelRetries, err)
+		doSeek = true
+		doReopen = true
+	}
+	if err != nil {
+		fs.Errorf(fh.remote, "ReadFileHandle.Read error: %v", err)
+	} else {
+		fh.offset = newOffset
+		// fs.Debugf(fh.remote, "ReadFileHandle.Read OK")
+
+		if fh.hash != nil {
+			_, err = fh.hash.Write(p[:n])
+			if err != nil {
+				fs.Errorf(fh.remote, "ReadFileHandle.Read HashError: %v", err)
+				return 0, err
+			}
+		}
+
+		// If we have no error and we didn't fill the buffer, must be EOF
+		if n != len(p) {
+			err = io.EOF
+		}
+	}
+	fh.cond.Broadcast() // wake everyone up waiting for an in-sequence read
+	return n, err
+}
+
+
 // ReadAt bytes from the file at off
 // merged with ReadAt from read.go
 func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
@@ -363,7 +459,7 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 	if(!fh.item.AllowDirectReadUpdate()){
 		return fh._readAt(b, off, true)
 	}else{
-		return fh.readAt(p, off)
+		return fh.readAtSource(p, off)
 	}
 }
 
