@@ -58,7 +58,8 @@ type RWFileHandle struct {
 	hash        *hash.MultiHasher
 	// opened      bool
 	remote      string
-	
+	// jellygrail custom
+	currentDirectReadMode bool
 }
 
 // Check interfaces
