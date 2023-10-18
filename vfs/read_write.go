@@ -295,11 +295,32 @@ func (fh *RWFileHandle) Close() error {
 // Because there can be multiple file descriptors referring to a
 // single opened file, Flush can be called multiple times.
 func (fh *RWFileHandle) Flush() error {
-	fh.mu.Lock()
-	fs.Debugf(fh.logPrefix(), "RWFileHandle.Flush")
-	fh.updateSize()
-	fh.mu.Unlock()
-	return nil
+
+	if(!fh.currentDirectReadMode){
+
+		fh.mu.Lock()
+		fs.Debugf(fh.logPrefix(), "RWFileHandle.Flush")
+		fh.updateSize()
+		fh.mu.Unlock()
+		return nil
+		
+	}else{
+		
+		fh.mu.Lock()
+		defer fh.mu.Unlock()
+		if !fh.opened {
+			return nil
+		}
+		// fs.Debugf(fh.remote, "ReadFileHandle.Flush")
+	
+		if err := fh.checkHash(); err != nil {
+			fs.Errorf(fh.remote, "ReadFileHandle.Flush error: %v", err)
+			return err
+		}
+	
+		// fs.Debugf(fh.remote, "ReadFileHandle.Flush OK")
+		return nil
+		
 }
 
 // Release is called when we are finished with the file handle
