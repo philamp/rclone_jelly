@@ -1312,15 +1312,16 @@ func (item *Item) AllowDirectReadUpdate() bool {
 	// Check if we should recheck the file presence, i.e.,
 	// if it hasn't been checked yet or if it's been over 3 seconds since the last check
 	shouldRecheck := item.lastCheckTime.IsZero() || currentTime.Sub(item.lastCheckTime) > 3*time.Second
-
-	if shouldRecheck {
-		item.lastCheckTime = currentTime
-		fs.Debugf("vfs cache: ITEM NAME : %s", item.name) // assuming fs is your logging package
-		emptyFilePath := filepath.Join(cacheDonePath, item.name)
-		fs.Debugf("vfs cache: ITEM PATH CHECKED IS : %s", emptyFilePath)
-		_, err := os.Stat(emptyFilePath)
-		// If the file exists and is empty, set allowWrite to false
-		item.allowDirectRead = !os.IsNotExist(err)
+	if !item.allowDirectRead {
+		if shouldRecheck {
+			item.lastCheckTime = currentTime
+			fs.Debugf("vfs cache: ITEM NAME : %s", item.name) // assuming fs is your logging package
+			emptyFilePath := filepath.Join(cacheDonePath, item.name)
+			fs.Debugf("vfs cache: ITEM PATH CHECKED IS : %s", emptyFilePath)
+			_, err := os.Stat(emptyFilePath)
+			// If the file exists and is empty, set allowWrite to false
+			item.allowDirectRead = !os.IsNotExist(err)
+		}
 	}
 	// handle other logic or errors as needed
 	return item.allowDirectRead
