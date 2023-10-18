@@ -169,7 +169,7 @@ func (fh *RWFileHandle) openPending() (err error) {
 // from read.go, append with "Source"
 // openPending opens the file if there is a pending open
 // call with the lock held
-func (fh *ReadFileHandle) openPendingSource() (err error) {
+func (fh *RWFileHandle) openPendingSource() (err error) {
 	if fh.opened {
 		return nil
 	}
