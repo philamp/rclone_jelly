@@ -69,6 +69,7 @@ var (
 	_ io.Closer   = (*RWFileHandle)(nil)
 )
 
+
 func newRWFileHandle(d *Dir, f *File, flags int) (fh *RWFileHandle, err error) {
 	var mhash *hash.MultiHasher
 	var err error
