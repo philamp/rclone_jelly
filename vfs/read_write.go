@@ -499,9 +499,24 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 func (fh *RWFileHandle) Read(b []byte) (n int, err error) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
-	n, err = fh._readAt(b, fh.offset, false)
-	fh.offset += int64(n)
-	return n, err
+
+	if(!fh.item.AllowDirectReadUpdate()){
+	
+		n, err = fh._readAt(b, fh.offset, false)
+		fh.offset += int64(n)
+		return n, err
+
+	}else{
+
+		if fh.roffset >= fh.size && !fh.sizeUnknown {
+			return 0, io.EOF
+		}
+		n, err = fh.readAtSource(p, fh.roffset)
+		fh.roffset += int64(n)
+		return n, err
+
+	}
+
 }
 
 // Seek to new file position
