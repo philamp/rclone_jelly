@@ -282,7 +282,13 @@ func (fh *RWFileHandle) closeSource() error {
 func (fh *RWFileHandle) Close() error {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
-	return fh.close()
+
+	if(!fh.currentDirectReadMode){
+		return fh.close()
+	}else{
+		return fh.closeSource()
+	}
+
 }
 
 // Flush is called each time the file or directory is closed.
