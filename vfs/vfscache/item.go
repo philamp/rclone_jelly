@@ -70,6 +70,7 @@ type Item struct {
 	pendingAccesses int                      // number of threads - cache reset not allowed if not zero
 	beingReset      bool                     // cache cleaner is resetting the cache file, access not allowed
 
+	// jellygrail custom
 	lastCheckTime    time.Time               // last time check was done on fs
     	allowDirectRead       bool                    // when file exists, allowDirectRead is True
 }
@@ -1302,7 +1303,7 @@ func (item *Item) WriteAt(b []byte, off int64) (n int, err error) {
 
 // jellgrail fork AWU, to know if the RW must be in source mode (allowWrite = false) or in cache mode (allowWrite = true)
 // TODO : we don't need shouldrecheck once allowWrite is false (but if it is not defined the first time, how to check it ?)
-// TODO : if allowWrite is false, check deeper if we need to be in source mode or in cache mode (in the calling function by checking if offset requested is within downloaded ranges, if so, switch in cache mode)
+// TODO : if allowDirectRead is true, check deeper if we need to be in source mode or in cache mode (in the calling function ? by checking if offset requested is within downloaded ranges, if so, switch in cache mode)
 
 func (item *Item) AllowDirectReadUpdate() bool {
 	cacheDonePath := "/jellygrail/cache_check"
