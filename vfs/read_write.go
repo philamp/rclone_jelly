@@ -386,6 +386,30 @@ func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool) (n int, err e
 	return n, err
 }
 
+func (fh *RWFileHandle) checkHash() error {
+	if fh.hash == nil || !fh.readCalled || fh.offset < fh.size {
+		return nil
+	}
+
+	o := fh.file.getObject()
+	for hashType, dstSum := range fh.hash.Sums() {
+		srcSum, err := o.Hash(context.TODO(), hashType)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				// if it was file not found then at
+				// this point we don't care any more
+				continue
+			}
+			return err
+		}
+		if !hash.Equals(dstSum, srcSum) {
+			return fmt.Errorf("corrupted on transfer: %v hash differ %q vs %q", hashType, dstSum, srcSum)
+		}
+	}
+
+	return nil
+}
+
 func waitSequential(what string, remote string, cond *sync.Cond, maxWait time.Duration, poff *int64, off int64) {
 	var (
 		timeout = time.NewTimer(maxWait)
