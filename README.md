@@ -4,9 +4,9 @@
 This is a fork of a fork.
 This fork is aimed to be used with jellygrail, an upcoming all in one solution to manage your sources of video assets based on a jellyfin package. **This is experimental as it changes the former purpose of rclone's cache.**
 
-its purpose is to make a rar2fs index cache and ffprobe cache to decrease real-debrid temporary ban issues when seeking a lot in the same RAR file
+its purpose is to make a rar2fs index cache and ffprobe cache to decrease real-debrid temporary ban issues when seeking a lot in the same RAR file.
 
-There are 2 modes taking place:
+There are 2 modes taking place when reading RAR files:
 
 * mode 1: --vfs-cache-mode full normal behavior when the file is being discovered and scanned by jellygrail. **(this is "Read-Write" cache mode)**
   * Jellygrail forces the continuous reading of the file to avoid multiple file open requests to the remote (thanks to ``unrar t -sl12582912`` that only reads headers/starting blocks of each file inside the rar, in the same session + reads files that are less than 10mb*)
@@ -14,7 +14,7 @@ There are 2 modes taking place:
 * mode 2: When file is finished being scanned, dynamic read-only takes place: it reads from either cache file or remote, depending on slice of data requested. **(this is "Read-Only" cache mode + "Direct source" mode)**
   * When ffprobe is reading the first 10mb of each file inside a RAR, it reads it directly from rclone cache and does not request it from remote.
   * when rar2fs lists RAR archive contents, it reads it directly from rclone cache and builds its index without requesting the remote for every file. Indeed rar2fs has a file-index cache but its not persistent so this fork makes up for this. In other words your rar2fs mount can now be killed but you keep the data needed to index what's inside the RAR files.. and no more waiting for temp realdebrid bans to expire.
-  * when kodi or jellyfin opens/scans a subtitle file from a RAR file, it reads it completely from cache, avoiding other multiple requests to the remote.
+  * when kodi or jellyfin opens/scans a subtitle file, it reads it completely from cache, avoiding other multiple requests to the remote.
 
 The solution could be improved by either:
 
