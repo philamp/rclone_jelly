@@ -1219,6 +1219,10 @@ func (item *Item) InUse() bool {
 	return item.inUse()
 }
 
+func (item *Item) GetInfoRsPresent (r ranges.Range){
+	return item.info.Rs.Present(r)
+}
+
 // ReadAt bytes from the file at off
 func (item *Item) ReadAt(b []byte, off int64, DirectReadModeROCache bool) (n int, err error) {
 	n = 0
@@ -1260,13 +1264,13 @@ func (item *Item) readAt(b []byte, off int64, DirectReadModeROCache bool) (n int
 	}
 	defer item.mu.Unlock()
 	if !DirectReadModeROCache {
-		fs.Debugf("### read_write.go _readAt CALLED ### (RW-CACHE) (atoffset=%s)", "")
+		fs.Debugf("### item.go readAt CALLED ### (RW-CACHE) (atoffset=%s)", "")
 		err = item._ensure(off, int64(len(b)))
 		if err != nil {
 			return 0, err
 		}
 	}else{
-		fs.Debugf("### read_write.go _readAt CALLED ### (RO-CACHE) (atoffset=%s)", "")
+		fs.Debugf("### item.go readAt CALLED ### (RO-CACHE) (atoffset=%s)", "")
 	}
 	
 	item.info.ATime = time.Now()
