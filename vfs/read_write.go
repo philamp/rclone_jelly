@@ -146,7 +146,7 @@ func (fh *RWFileHandle) writeOnly() bool {
 func (fh *RWFileHandle) openPending() (err error) {
 	if fh.opened {
 		// ---- jellygrail custom
-		if fh.item.opens == 1 {
+		if fh.item.InUse() {
 			return nil
 		}
 	}
