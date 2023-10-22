@@ -144,12 +144,12 @@ func (fh *RWFileHandle) writeOnly() bool {
 //
 // call with the lock held
 func (fh *RWFileHandle) openPending() (err error) {
-	if fh.opened {
+	//if fh.opened {
 		// ---- jellygrail custom
-		if fh.item.InUse() {
-			return nil
-		}
-	}
+		//if fh.item.InUse() {
+		//	return nil
+		//}
+	//}
 	defer log.Trace(fh.logPrefix(), "")("err=%v", &err)
 
 	fh.file.muRW.Lock()
