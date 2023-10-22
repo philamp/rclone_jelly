@@ -1,3 +1,20 @@
+
+# Fork of "RClone_RD"
+
+This is a fork of a fork.
+This fork is aimed to be used with jellygrail, an upcoming all in one solution to manage your sources of video assets based on a jellyfin package. This is experimental as it changes the purpose of rclone's cache.
+
+its purpose is to make a rar2fs index and ffprobe cache to decrease real-debird temporary ban issues when seeking a lot in the same RAR file
+
+There are 2 modes
+
+* --vfs-cache-mode full normal behavior when the file is being discovered and scanned by jellygrail. (this is "Read-Write" cache mode)
+  * Jellygrail forces the continuous reading of the file to avoid multiple file open requests to the remote (with unrar t -sl12582912)
+  * So the cache file is filled with useful data for later
+* When file is finished to be scanned, dynamic read-only takes place: it reads from either cache file or remote, depending on slice of data requested. (this is "Read-Only" cache mode + "Direct source" mode)
+  * when ffprobe is reading the first 10mb of each file inside a RAR, it reads it directly from rclone cache and does not request it from remote.
+  * when rar2fs lists RAR archive contents, it reads it directly from rclone cache and buils its index without requesting the remote for every file.
+
 # NOTICE
 
 ### EVENTHOUGH REALDEBRID NOW SUPPORTS WEBDAV, I STILL RECOMMEND USING THIS FORK
