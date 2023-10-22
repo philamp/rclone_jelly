@@ -1213,12 +1213,6 @@ func (item *Item) GetModTime() (modTime time.Time, err error) {
 }
 
 // jellygrail Getters
-func (item *Item) InUse() bool {
-	item.mu.Lock()
-	defer item.mu.Unlock()
-	return item.inUse()
-}
-
 func (item *Item) GetInfoRsPresent(offset int64, size int64) bool{
 	item.mu.Lock()
 	defer item.mu.Unlock()
