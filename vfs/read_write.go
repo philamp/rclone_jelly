@@ -408,7 +408,7 @@ func (fh *RWFileHandle) Stat() (os.FileInfo, error) {
 //
 // call with lock held
 func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool) (n int, err error) {
-	fs.Debugf("### read_write.go _readAt CALLED ### (cache) (atoffset=%d)", off)
+	fs.Debugf("### read_write.go _readAt CALLED ### (cache) (atoffset=%s)", "")
 	defer log.Trace(fh.logPrefix(), "size=%d, off=%d", len(b), off)("n=%d, err=%v", &n, &err)
 	if fh.closed {
 		return n, ECLOSED
@@ -546,7 +546,7 @@ func (fh *RWFileHandle) seek(offset int64, reopen bool) (err error) {
 
 // added from read.go and renamed with +Source
 func (fh *RWFileHandle) readAtSource(p []byte, off int64) (n int, err error) {
-	fs.Debugf("### read_write.go readAtSource CALLED ### (directsource) (atoffset=%d)", off)
+	fs.Debugf("### read_write.go readAtSource CALLED ### (directsource) (atoffset=%s)", "")
 	// defer log.Trace(fh.remote, "p[%d], off=%d", len(p), off)("n=%d, err=%v", &n, &err)
 	err = fh.openPendingSource() // FIXME pending open could be more efficient in the presence of seek (and retries)
 	if err != nil {
@@ -646,7 +646,7 @@ func (fh *RWFileHandle) readAtSource(p []byte, off int64) (n int, err error) {
 func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
-	fs.Debugf("### read_write.go ReadAt CALLED ### (atoffset=%d)", off)
+	fs.Debugf("### read_write.go ReadAt CALLED ### (atoffset=%s)", "")
 	if(!fh.item.AllowDirectReadUpdate()){
 		fh.currentDirectReadMode = false
 		return fh._readAt(b, off, true)
@@ -660,7 +660,7 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 func (fh *RWFileHandle) Read(b []byte) (n int, err error) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
-	fs.Debugf("### read_write.go Read CALLED ### while fh.offset=%d", fh.offset)
+	fs.Debugf("### read_write.go Read CALLED ### while fh.offset=%s", "")
 	if(!fh.item.AllowDirectReadUpdate()){
 		fh.currentDirectReadMode = false
 		n, err = fh._readAt(b, fh.offset, false)
