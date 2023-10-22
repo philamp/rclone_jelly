@@ -4,7 +4,7 @@
 This is a fork of a fork.
 This fork is aimed to be used with jellygrail, an upcoming all-in-one solution to manage your sources of video assets based on a jellyfin package. **This is experimental as it changes the former purpose of rclone's cache.**
 
-its purpose is to make a rar2fs index cache and ffprobe cache to decrease real-debrid temporary ban issues when seeking a lot in the same RAR file.
+Its purpose is to provide a rar2fs index cache and a jellyfin/ffprobe cache to decrease real-debrid ban issues that happens when seeking a lot in the same RAR file.
 
 There are 2 modes taking place sequentially when reading a RAR file:
 
