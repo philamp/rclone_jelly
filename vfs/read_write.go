@@ -22,7 +22,7 @@ import (
 	"github.com/rclone/rclone/fs/hash"
 
 	// from vfscache/item.go
-	"github.com/rclone/rclone/lib/ranges"
+	// "github.com/rclone/rclone/lib/ranges" DEPRECATED
 )
 
 // RWFileHandle is a handle that can be open for read and write.
@@ -680,11 +680,11 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 		if offset+size > itemSize {
 			size = itemSize - offset
 		}
-		r := ranges.Range{Pos: offset, Size: size}
+		// r := ranges.Range{Pos: offset, Size: size} DEPRECATED
 		
 		// present := fh.item.info.Rs.Present(r) DEPRECATED
 
-		present := fh.item.GetInfoRsPresent(r)
+		present := fh.item.GetInfoRsPresent(offset, size)
 		
 		if present {
 			// switch to a custom _readAt without cache write 
