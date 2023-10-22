@@ -677,9 +677,9 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 			// switch to a custom _readAt without cache write 
 			fs.Debugf("### DIRECT MODE / CACHE (read-only) ### %s", "")
 			item.info.ATime = time.Now()
-			// Do the reading with Item.mu unlocked and cache protected by preAccess -> not needed as we never delete the "partial" cache in this forked version
+			// Do the reading with Item.mu unlocked and cache protected by preAccess -> not needed as we never delete the "partial" "cache" in this forked version
 			// return fh.item.fd.ReadAt(b, off) for going directly (deprecated)
-			// 4th arg to true sets the _readAt to RO
+			// 4th arg true sets the _readAt to RO
 			return fh._readAt(b, off, true, true)
 		}
 		fs.Debugf("### DIRECT MODE / SOURCE ### %s", "")
