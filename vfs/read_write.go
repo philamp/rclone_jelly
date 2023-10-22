@@ -731,6 +731,7 @@ func (fh *RWFileHandle) Read(b []byte) (n int, err error) {
 func (fh *RWFileHandle) Seek(offset int64, whence int) (ret int64, err error) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
+	fs.Debugf("### read_write.go Seek CALLED ### while fh.offset=%s", "")
 
 	if(!fh.currentDirectReadMode){
 	
