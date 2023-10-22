@@ -6,12 +6,12 @@ This fork is aimed to be used with jellygrail, an upcoming all in one solution t
 
 its purpose is to make a rar2fs index cache and ffprobe cache to decrease real-debrid temporary ban issues when seeking a lot in the same RAR file
 
-There are 2 modes
+There are 2 modes taking place:
 
-* --vfs-cache-mode full normal behavior when the file is being discovered and scanned by jellygrail. **(this is "Read-Write" cache mode)**
+* mode 1: --vfs-cache-mode full normal behavior when the file is being discovered and scanned by jellygrail. **(this is "Read-Write" cache mode)**
   * Jellygrail forces the continuous reading of the file to avoid multiple file open requests to the remote (thanks to unrar t -sl12582912 that only reads the first 10mb of each file in the same session)
   * So the cache file is filled with useful data for later
-* When file is finished being scanned, dynamic read-only takes place: it reads from either cache file or remote, depending on slice of data requested. **(this is "Read-Only" cache mode + "Direct source" mode)**
+* mode 2: When file is finished being scanned, dynamic read-only takes place: it reads from either cache file or remote, depending on slice of data requested. **(this is "Read-Only" cache mode + "Direct source" mode)**
   * When ffprobe is reading the first 10mb of each file inside a RAR, it reads it directly from rclone cache and does not request it from remote.
   * when rar2fs lists RAR archive contents, it reads it directly from rclone cache and builds its index without requesting the remote for every file. Indeed rar2fs has a file-index cache but its not persistent so this fork makes up for this. In other words your rar2fs mount can now be killed but you keep the data needed to index what's inside the RAR files.. and no more waiting for temp realdebrid bans to expire.
 
@@ -19,6 +19,8 @@ The solution could be improved by either:
 
 * forking rar2fs to include a persistent cache
 * forking rclone with https://github.com/gen2brain/go-unarr to take care of RAR file (+ their cache) directly in rclone
+
+It would avoid the "black magic stuff" such as flaging the file when scanned (to switch from mode 1 to mode 2) and unrar -t trick
 
 ## Notes
 
