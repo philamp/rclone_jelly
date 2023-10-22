@@ -1219,7 +1219,7 @@ func (item *Item) InUse() bool {
 	return item.inUse()
 }
 
-func (item *Item) GetInfoRsPresent (r ranges.Range){
+func (item *Item) GetInfoRsPresent(r ranges.Range) bool{
 	return item.info.Rs.Present(r)
 }
 
