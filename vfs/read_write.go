@@ -433,13 +433,16 @@ func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool, DirectReadMod
 		// Do the writing with fh.mu unlocked
 		fh.mu.Unlock()
 	}
-	if !DirectReadModeROCache {
-		n, err = fh.item.ReadAt(b, off)
-		fs.Debugf("### read_write.go _readAt CALLED ### (RW-CACHE) (atoffset=%s)", "")
-	} else {
-		n, err = fh.item.fd.ReadAt(b, off)
-		fs.Debugf("### read_write.go _readAt CALLED ### (RO-CACHE) (atoffset=%s)", "")
-	}
+	// if !DirectReadModeROCache {
+		// n, err = fh.item.ReadAt(b, off)
+		// fs.Debugf("### read_write.go _readAt CALLED ### (RW-CACHE) (atoffset=%s)", "")
+	// } else {
+		// n, err = fh.item.fd.ReadAt(b, off)
+		// n, err = fh.item.ReadAt(b, off, DirectReadModeROCache)
+		// fs.Debugf("### read_write.go _readAt CALLED ### (RO-CACHE) (atoffset=%s)", "")
+	// }
+
+	n, err = fh.item.ReadAt(b, off, DirectReadModeROCache)
 	
 	
 	if release {
@@ -671,15 +674,20 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 		// jellygrail custom ----- switch between fd.read and readAtSource
 		offset := off
 		size := int64(len(b))
-		if offset+size > fh.item.info.Size {
-			size = fh.item.info.Size - offset
+		itemSize := fh.item.GetSize()
+		if offset+size > itemSize {
+			size = itemSize - offset
 		}
 		r := ranges.Range{Pos: offset, Size: size}
-		present := fh.item.info.Rs.Present(r)
+		
+		// present := fh.item.info.Rs.Present(r) DEPRECATED
+
+		present := fh.item.GetInfoRsPresent(r)
+		
 		if present {
 			// switch to a custom _readAt without cache write 
 			fs.Debugf("### DIRECT MODE / CACHE (read-only) ### %s", "")
-			fh.item.info.ATime = time.Now()
+			// fh.item.info.ATime = time.Now()
 			// Do the reading with Item.mu unlocked and cache protected by preAccess -> not needed as we never delete the "partial" "cache" in this forked version
 			// return fh.item.fd.ReadAt(b, off) for going directly (deprecated)
 			// 4th arg true sets the _readAt to RO
