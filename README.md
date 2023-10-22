@@ -20,7 +20,7 @@ The solution could be improved by either:
 * forking rar2fs to include a persistent cache
 * forking rclone with https://github.com/gen2brain/go-unarr to take care of RAR file (+ their cache) directly in rclone
 
-It would avoid the "black magic stuff" such as flaging the file when scanned (to switch from mode 1 to mode 2) and ´´unrar -t´´ trick
+It would avoid the "black magic stuff" such as flaging the file when scanned (to switch from mode 1 to mode 2) and ´´´´unrar -t´´´´ trick
 
 ## Notes
 
