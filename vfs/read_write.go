@@ -63,6 +63,8 @@ type RWFileHandle struct {
 	remote      string
 	// jellygrail custom
 	currentDirectReadMode bool
+	openedSource bool
+	openedCache bool
 }
 
 // Check interfaces
@@ -144,12 +146,9 @@ func (fh *RWFileHandle) writeOnly() bool {
 //
 // call with the lock held
 func (fh *RWFileHandle) openPending() (err error) {
-	//if fh.opened {
-		// ---- jellygrail custom
-		//if fh.item.InUse() {
-		//	return nil
-		//}
-	//}
+	if fh.openedCache {
+		return nil
+	}
 	defer log.Trace(fh.logPrefix(), "")("err=%v", &err)
 
 	fh.file.muRW.Lock()
@@ -169,6 +168,7 @@ func (fh *RWFileHandle) openPending() (err error) {
 		fh.offset = 0
 	}
 	fh.opened = true
+	fh.openedCache = true // jellygrail custom
 	fh.d.addObject(fh.file) // make sure the directory has this object in it now
 	return nil
 }
@@ -177,7 +177,7 @@ func (fh *RWFileHandle) openPending() (err error) {
 // openPending opens the file if there is a pending open
 // call with the lock held
 func (fh *RWFileHandle) openPendingSource() (err error) {
-	if fh.opened {
+	if fh.openedSource {
 		return nil
 	}
 	o := fh.file.getObject()
@@ -189,6 +189,7 @@ func (fh *RWFileHandle) openPendingSource() (err error) {
 	fh.done = tr.Done
 	fh.r = tr.Account(context.TODO(), r).WithBuffer() // account the transfer
 	fh.opened = true
+	fh.openedSource = true // jellygrail custom
 
 	return nil
 }
@@ -246,6 +247,7 @@ func (fh *RWFileHandle) close() (err error) {
 	if fh.opened {
 		err = fh.item.Close(fh.file.setObject)
 		fh.opened = false
+		
 	} else {
 		// apply any pending mod times if any
 		_ = fh.file.applyPendingModTime()
