@@ -13,7 +13,7 @@ There are 2 modes
   * So the cache file is filled with useful data for later
 * When file is finished being scanned, dynamic read-only takes place: it reads from either cache file or remote, depending on slice of data requested. **(this is "Read-Only" cache mode + "Direct source" mode)**
   * When ffprobe is reading the first 10mb of each file inside a RAR, it reads it directly from rclone cache and does not request it from remote.
-  * when rar2fs lists RAR archive contents, it reads it directly from rclone cache and builds its index without requesting the remote for every file. rar2fs has an index cache but its not persistent so this fork makes up for the lack of rar2fs persistent index: in other words your rar2fs mount can now be killed but you keep the data needed to index what's inside the RAR files.. and no more waiting for temp realdebrid bans to expire.
+  * when rar2fs lists RAR archive contents, it reads it directly from rclone cache and builds its index without requesting the remote for every file. Indeed rar2fs has a file-index cache but its not persistent so this fork makes up for this. In other words your rar2fs mount can now be killed but you keep the data needed to index what's inside the RAR files.. and no more waiting for temp realdebrid bans to expire.
 
 The solution could be improved by either:
 
