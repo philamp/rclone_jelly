@@ -2,7 +2,7 @@
 # Fork of "RClone_RD"
 
 This is a fork of a fork.
-This fork is aimed to be used with jellygrail, an upcoming all in one solution to manage your sources of video assets based on a jellyfin package. This is experimental as it changes the purpose of rclone's cache.
+This fork is aimed to be used with jellygrail, an upcoming all in one solution to manage your sources of video assets based on a jellyfin package. **This is experimental as it changes the former purpose of rclone's cache.**
 
 its purpose is to make a rar2fs index and ffprobe cache to decrease real-debird temporary ban issues when seeking a lot in the same RAR file
 
