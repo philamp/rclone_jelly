@@ -674,7 +674,7 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 		// jellygrail custom ----- switch between fd.read and readAtSource
 		offset := off
 		size := int64(len(b))
-		itemSize := fh.item.GetSize()
+		itemSize := fh._size()
 		if offset+size > itemSize {
 			size = itemSize - offset
 		}
