@@ -1220,6 +1220,8 @@ func (item *Item) InUse() bool {
 }
 
 func (item *Item) GetInfoRsPresent(r ranges.Range) bool{
+	item.mu.Lock()
+	defer item.mu.Unlock()
 	return item.info.Rs.Present(r)
 }
 
