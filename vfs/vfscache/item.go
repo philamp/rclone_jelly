@@ -73,6 +73,7 @@ type Item struct {
 	// jellygrail custom
 	lastCheckTime    time.Time               // last time check was done on fs
     	allowDirectRead       bool                    // when file exists, allowDirectRead is True
+	
 }
 
 // Info is persisted to backing store
