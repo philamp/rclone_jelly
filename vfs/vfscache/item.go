@@ -1212,6 +1212,13 @@ func (item *Item) GetModTime() (modTime time.Time, err error) {
 	return modTime, nil
 }
 
+// jellygrail Getters
+func (item *Item) InUse() bool {
+	item.mu.Lock()
+	defer item.mu.Unlock()
+	return item.inUse()
+}
+
 // ReadAt bytes from the file at off
 func (item *Item) ReadAt(b []byte, off int64) (n int, err error) {
 	n = 0
