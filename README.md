@@ -29,7 +29,7 @@ this fork can be used with other cloud providers that might do similar throtling
 
 ## Data storage
 
-On average, this solution avoids local extraction of RAR files thus takes on your storage less than 1% of the original size
+On average, this solution avoids local extraction of RAR files thus takes on your storage less than 1% of the original RAR filesize
 
 # NOTICE
 
