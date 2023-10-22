@@ -247,7 +247,8 @@ func (fh *RWFileHandle) close() (err error) {
 	if fh.opened {
 		err = fh.item.Close(fh.file.setObject)
 		fh.opened = false
-		
+		fh.openedSource = false
+		fh.openedCache = false
 	} else {
 		// apply any pending mod times if any
 		_ = fh.file.applyPendingModTime()
@@ -869,7 +870,7 @@ func (fh *RWFileHandle) Sync() error {
 	if fh.closed {
 		return ECLOSED
 	}
-	if !fh.opened {
+	if !fh.openedCache {
 		return nil
 	}
 	if fh.readOnly() {
