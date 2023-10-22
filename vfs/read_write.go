@@ -411,6 +411,7 @@ func (fh *RWFileHandle) Stat() (os.FileInfo, error) {
 //
 // call with lock held
 func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool, DirectReadModeROCache bool) (n int, err error) {
+	
 	fs.Debugf("### read_write.go _readAt CALLED ### (cache) (atoffset=%s)", "")
 	defer log.Trace(fh.logPrefix(), "size=%d, off=%d", len(b), off)("n=%d, err=%v", &n, &err)
 	if fh.closed {
@@ -431,8 +432,10 @@ func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool, DirectReadMod
 	}
 	if !DirectReadModeROCache {
 		n, err = fh.item.ReadAt(b, off)
+		fs.Debugf("### read_write.go _readAt CALLED ### (RW-CACHE) (atoffset=%s)", "")
 	} else {
 		n, err = fh.item.fd.ReadAt(b, off)
+		fs.Debugf("### read_write.go _readAt CALLED ### (RO-CACHE) (atoffset=%s)", "")
 	}
 	
 	
@@ -656,7 +659,7 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 	fs.Debugf("### read_write.go ReadAt CALLED ### (atoffset=%s)", "")
 	if(!fh.item.AllowDirectReadUpdate()){
 		fh.currentDirectReadMode = false
-		return fh._readAt(b, off, true)
+		return fh._readAt(b, off, true, false)
 	}else{
 		
 		fh.currentDirectReadMode = true
@@ -676,7 +679,6 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 			item.info.ATime = time.Now()
 			// Do the reading with Item.mu unlocked and cache protected by preAccess -> not needed as we never delete the "partial" cache in this forked version
 			// return fh.item.fd.ReadAt(b, off) for going directly (deprecated)
-			// set currentDirectReadModeROCache var in object OR directly passed to 
 			return fh._readAt(b, off, true, true)
 		}
 		fs.Debugf("### DIRECT MODE / SOURCE ### %s", "")
@@ -693,7 +695,7 @@ func (fh *RWFileHandle) Read(b []byte) (n int, err error) {
 	fs.Debugf("### read_write.go Read CALLED ### while fh.offset=%s", "")
 	if(!fh.item.AllowDirectReadUpdate()){
 		fh.currentDirectReadMode = false
-		n, err = fh._readAt(b, fh.offset, false)
+		n, err = fh._readAt(b, fh.offset, false, false)
 		fh.offset += int64(n)
 		return n, err
 
