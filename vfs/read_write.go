@@ -142,7 +142,10 @@ func (fh *RWFileHandle) writeOnly() bool {
 // call with the lock held
 func (fh *RWFileHandle) openPending() (err error) {
 	if fh.opened {
-		return nil
+		# ---- jellygrail custom
+		if fh.item.opens == 1 {
+			return nil
+		}
 	}
 	defer log.Trace(fh.logPrefix(), "")("err=%v", &err)
 
