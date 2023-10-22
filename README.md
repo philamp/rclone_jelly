@@ -17,7 +17,7 @@ Below are few examples:
   * When rar2fs lists RAR archive contents, it reads it directly from rclone cache and builds its index without requesting the remote for every file. Indeed rar2fs has a file-index cache but its not persistent so this fork also makes up for this. In other words your rar2fs mount can now be killed without loosing the data needed to index what's inside the RAR files.. and no more waiting for temp realdebrid bans to expire.
   * When kodi or jellyfin opens/scans a subtitle file, it reads it completely from cache, avoiding other multiple requests to the remote.
 
-The solution could be improved by either:
+## Other solution planned if possible:
 
 * forking rar2fs to include a persistent cache
 * forking rclone with https://github.com/gen2brain/go-unarr to take care of RAR file (+ their cache) directly in rclone
