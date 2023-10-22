@@ -415,7 +415,6 @@ func (fh *RWFileHandle) Stat() (os.FileInfo, error) {
 // call with lock held
 func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool, DirectReadModeROCache bool) (n int, err error) {
 	
-	fs.Debugf("### read_write.go _readAt CALLED ### (cache) (atoffset=%s)", "")
 	defer log.Trace(fh.logPrefix(), "size=%d, off=%d", len(b), off)("n=%d, err=%v", &n, &err)
 	if fh.closed {
 		return n, ECLOSED
