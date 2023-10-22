@@ -9,7 +9,7 @@ its purpose is to make a rar2fs index cache and ffprobe cache to decrease real-d
 There are 2 modes taking place:
 
 * mode 1: --vfs-cache-mode full normal behavior when the file is being discovered and scanned by jellygrail. **(this is "Read-Write" cache mode)**
-  * Jellygrail forces the continuous reading of the file to avoid multiple file open requests to the remote (thanks to unrar t -sl12582912 that only reads the first 10mb of each file in the same session)
+  * Jellygrail forces the continuous reading of the file to avoid multiple file open requests to the remote (thanks to unrar t -sl12582912 that only reads headers/starting blocks of each file inside the rar, in the same session)
   * So the cache file is filled with useful data for later
 * mode 2: When file is finished being scanned, dynamic read-only takes place: it reads from either cache file or remote, depending on slice of data requested. **(this is "Read-Only" cache mode + "Direct source" mode)**
   * When ffprobe is reading the first 10mb of each file inside a RAR, it reads it directly from rclone cache and does not request it from remote.
