@@ -20,6 +20,9 @@ import (
 	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/chunkedreader"
 	"github.com/rclone/rclone/fs/hash"
+
+	// from vfscache/item.go
+	"github.com/rclone/rclone/lib/ranges"
 )
 
 // RWFileHandle is a handle that can be open for read and write.
@@ -676,7 +679,7 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 		if present {
 			// switch to a custom _readAt without cache write 
 			fs.Debugf("### DIRECT MODE / CACHE (read-only) ### %s", "")
-			item.info.ATime = time.Now()
+			fh.item.info.ATime = time.Now()
 			// Do the reading with Item.mu unlocked and cache protected by preAccess -> not needed as we never delete the "partial" "cache" in this forked version
 			// return fh.item.fd.ReadAt(b, off) for going directly (deprecated)
 			// 4th arg true sets the _readAt to RO
