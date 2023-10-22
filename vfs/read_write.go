@@ -410,7 +410,7 @@ func (fh *RWFileHandle) Stat() (os.FileInfo, error) {
 // if release is set then it releases the mutex just before doing the IO
 //
 // call with lock held
-func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool) (n int, err error) {
+func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool, DirectReadModeROCache bool) (n int, err error) {
 	fs.Debugf("### read_write.go _readAt CALLED ### (cache) (atoffset=%s)", "")
 	defer log.Trace(fh.logPrefix(), "size=%d, off=%d", len(b), off)("n=%d, err=%v", &n, &err)
 	if fh.closed {
@@ -671,7 +671,9 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 			fs.Debugf("### DIRECT MODE / CACHE (read-only) ### %s", "")
 			item.info.ATime = time.Now()
 			// Do the reading with Item.mu unlocked and cache protected by preAccess -> not needed as we never delete the "partial" cache in this forked version
-			return fh.item.fd.ReadAt(b, off)
+			// return fh.item.fd.ReadAt(b, off) for going directly (deprecated)
+			// set currentDirectReadModeROCache var in object OR directly passed to 
+			return fh._readAt(b, off, true, true)
 		}
 		fs.Debugf("### DIRECT MODE / SOURCE ### %s", "")
 		// ---- jellygrail custom
