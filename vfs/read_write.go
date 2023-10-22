@@ -429,9 +429,13 @@ func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool, DirectReadMod
 		// Do the writing with fh.mu unlocked
 		fh.mu.Unlock()
 	}
-
-	n, err = fh.item.ReadAt(b, off)
-
+	if !DirectReadModeROCache {
+		n, err = fh.item.ReadAt(b, off)
+	} else {
+		n, err = fh.item.fd.ReadAt(b, off)
+	}
+	
+	
 	if release {
 		fh.mu.Lock()
 	}
