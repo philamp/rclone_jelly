@@ -1219,9 +1219,12 @@ func (item *Item) InUse() bool {
 	return item.inUse()
 }
 
-func (item *Item) GetInfoRsPresent(r ranges.Range) bool{
+func (item *Item) GetInfoRsPresent(offset int64, size int64) bool{
 	item.mu.Lock()
 	defer item.mu.Unlock()
+
+	r := ranges.Range{Pos: offset, Size: size}
+	
 	return item.info.Rs.Present(r)
 }
 
