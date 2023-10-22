@@ -22,7 +22,7 @@ The solution could be improved by either:
 
 ## Data storage
 
-On average, this solution takes less than 1% of the remote media file size in your storage
+On average, this solution avoids local extraction of RAR files thus takes on your storage less than 1% of the original size
 
 # NOTICE
 
