@@ -142,7 +142,7 @@ func (fh *RWFileHandle) writeOnly() bool {
 // call with the lock held
 func (fh *RWFileHandle) openPending() (err error) {
 	if fh.opened {
-		# ---- jellygrail custom
+		// ---- jellygrail custom
 		if fh.item.opens == 1 {
 			return nil
 		}
@@ -674,11 +674,12 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 		r := ranges.Range{Pos: offset, Size: size}
 		present := fh.item.info.Rs.Present(r)
 		if present {
-			#switch to a custom _readAt without cache write 
+			// switch to a custom _readAt without cache write 
 			fs.Debugf("### DIRECT MODE / CACHE (read-only) ### %s", "")
 			item.info.ATime = time.Now()
 			// Do the reading with Item.mu unlocked and cache protected by preAccess -> not needed as we never delete the "partial" cache in this forked version
 			// return fh.item.fd.ReadAt(b, off) for going directly (deprecated)
+			// 4th arg to true sets the _readAt to RO
 			return fh._readAt(b, off, true, true)
 		}
 		fs.Debugf("### DIRECT MODE / SOURCE ### %s", "")
