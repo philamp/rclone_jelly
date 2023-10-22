@@ -651,7 +651,28 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 		fh.currentDirectReadMode = false
 		return fh._readAt(b, off, true)
 	}else{
+		
 		fh.currentDirectReadMode = true
+
+		
+		// jellygrail custom ----- switch between fd.read and readAtSource
+		offset := off
+		size := int64(len(b))
+		if offset+size > fh.item.info.Size {
+			size = fh.item.info.Size - offset
+		}
+		r := ranges.Range{Pos: offset, Size: size}
+		present := fh.item.info.Rs.Present(r)
+		if present {
+			#switch to a custom _readAt without cache write 
+			fs.Debugf("### DIRECT MODE / CACHE (read-only) ### %s", "")
+			item.info.ATime = time.Now()
+			// Do the reading with Item.mu unlocked and cache protected by preAccess -> not needed as we never delete the "partial" cache in this forked version
+			return fh.item.fd.ReadAt(b, off)
+		}
+		fs.Debugf("### DIRECT MODE / SOURCE ### %s", "")
+		// ---- jellygrail custom
+		
 		return fh.readAtSource(b, off)
 	}
 }
