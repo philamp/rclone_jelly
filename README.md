@@ -32,6 +32,8 @@ this fork can be used with other cloud providers that might do similar throtling
 
 On average, this solution avoids local extraction of RAR files thus takes on your storage less than 1% of the original RAR filesize
 
+# Original README.MD file below:
+
 # NOTICE
 
 ### EVENTHOUGH REALDEBRID NOW SUPPORTS WEBDAV, I STILL RECOMMEND USING THIS FORK
