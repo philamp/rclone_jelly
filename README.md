@@ -22,7 +22,7 @@ The solution could be improved by either:
 
 ## Notes
 
-Other cloud data providers might do throtling/bans when rclone requests a lot so this fork can be used in these contexts as well.
+this fork can be used with other cloud providers that might do similar throtling/bans
 
 ## Data storage
 
