@@ -13,7 +13,16 @@ There are 2 modes
   * So the cache file is filled with useful data for later
 * When file is finished to be scanned, dynamic read-only takes place: it reads from either cache file or remote, depending on slice of data requested. **(this is "Read-Only" cache mode + "Direct source" mode)**
   * When ffprobe is reading the first 10mb of each file inside a RAR, it reads it directly from rclone cache and does not request it from remote.
-  * when rar2fs lists RAR archive contents, it reads it directly from rclone cache and buils its index without requesting the remote for every file.
+  * when rar2fs lists RAR archive contents, it reads it directly from rclone cache and builds its index without requesting the remote for every file. So it makes up for the lack of rar2fs persistent index.
+
+The solution could be improved by either:
+
+* forking rar2fs to include a persistent cache
+* forking rclone with https://github.com/gen2brain/go-unarr to take care of RAR file (+ their cache) directly in rclone
+
+## Data storage
+
+On average, this solution takes less than 1% of the remote media file size in your storage
 
 # NOTICE
 
