@@ -1,7 +1,7 @@
 
 # Fork of "RClone_RD"
 
-## An experimental cache system when using rar2fs over rclone
+## An experimental cache system when using rar2fs over rclone mount
 
 This is a fork of a fork.
 This fork is aimed to be used with jellygrail, an upcoming all-in-one solution to manage your sources of video assets based on a jellyfin package. **This is experimental as it changes the former purpose of rclone's cache.**
