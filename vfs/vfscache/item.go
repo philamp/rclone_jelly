@@ -1220,12 +1220,12 @@ func (item *Item) InUse() bool {
 }
 
 // ReadAt bytes from the file at off
-func (item *Item) ReadAt(b []byte, off int64) (n int, err error) {
+func (item *Item) ReadAt(b []byte, off int64, DirectReadModeROCache bool) (n int, err error) {
 	n = 0
 	var expBackOff int
 	for retries := 0; retries < fs.GetConfig(context.TODO()).LowLevelRetries; retries++ {
 		item.preAccess()
-		n, err = item.readAt(b, off)
+		n, err = item.readAt(b, off, DirectReadModeROCache)
 		item.postAccess()
 		if err == nil || err == io.EOF {
 			break
@@ -1248,7 +1248,7 @@ func (item *Item) ReadAt(b []byte, off int64) (n int, err error) {
 }
 
 // ReadAt bytes from the file at off
-func (item *Item) readAt(b []byte, off int64) (n int, err error) {
+func (item *Item) readAt(b []byte, off int64, DirectReadModeROCache bool) (n int, err error) {
 	item.mu.Lock()
 	if item.fd == nil {
 		item.mu.Unlock()
@@ -1259,14 +1259,19 @@ func (item *Item) readAt(b []byte, off int64) (n int, err error) {
 		return 0, io.EOF
 	}
 	defer item.mu.Unlock()
-
-	err = item._ensure(off, int64(len(b)))
-	if err != nil {
-		return 0, err
+	if !DirectReadModeROCache {
+		fs.Debugf("### read_write.go _readAt CALLED ### (RW-CACHE) (atoffset=%s)", "")
+		err = item._ensure(off, int64(len(b)))
+		if err != nil {
+			return 0, err
+		}
+	}else{
+		fs.Debugf("### read_write.go _readAt CALLED ### (RO-CACHE) (atoffset=%s)", "")
 	}
-
+	
 	item.info.ATime = time.Now()
 	// Do the reading with Item.mu unlocked and cache protected by preAccess
+	
 	n, err = item.fd.ReadAt(b, off)
 	return n, err
 }
