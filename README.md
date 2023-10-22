@@ -2,7 +2,7 @@
 # Fork of "RClone_RD"
 
 This is a fork of a fork.
-This fork is aimed to be used with jellygrail, an upcoming all in one solution to manage your sources of video assets based on a jellyfin package. **This is experimental as it changes the former purpose of rclone's cache.**
+This fork is aimed to be used with jellygrail, an upcoming all-in-one solution to manage your sources of video assets based on a jellyfin package. **This is experimental as it changes the former purpose of rclone's cache.**
 
 its purpose is to make a rar2fs index cache and ffprobe cache to decrease real-debrid temporary ban issues when seeking a lot in the same RAR file.
 
@@ -11,7 +11,8 @@ There are 2 modes taking place sequentially when reading a RAR file:
 * mode 1: --vfs-cache-mode full normal behavior when the file is being discovered and scanned by jellygrail. **(this is "Read-Write" cache mode)**
   * Jellygrail forces continuous reading of the RAR file to avoid multiple file open requests to the remote (thanks to ``unrar t -sl12582912`` that only reads headers/starting blocks of each file inside the rar + reads files that are less than 10mb, all in the same file open session)
   * So the cache file is filled with useful data for later
-* mode 2: When file is finished being scanned, dynamic read-only takes place: it reads from either cache file or remote, depending on slice of data requested. **(this is "Read-Only" cache mode + "Direct source" mode)**, few examples:
+* mode 2: When file is finished being scanned, dynamic read-only takes place: it reads from either cache file or remote, depending on slice of data requested. **(this is "Read-Only" cache mode + "Direct source" mode)**. 
+Below are few examples:
   * When ffprobe is reading the first 10mb of each file inside a RAR, it reads it directly from rclone cache and does not request it from remote.
   * When rar2fs lists RAR archive contents, it reads it directly from rclone cache and builds its index without requesting the remote for every file. Indeed rar2fs has a file-index cache but its not persistent so this fork makes up for this. In other words your rar2fs mount can now be killed but you keep the data needed to index what's inside the RAR files.. and no more waiting for temp realdebrid bans to expire.
   * When kodi or jellyfin opens/scans a subtitle file, it reads it completely from cache, avoiding other multiple requests to the remote.
