@@ -11,7 +11,7 @@ There are 2 modes
 * --vfs-cache-mode full normal behavior when the file is being discovered and scanned by jellygrail. **(this is "Read-Write" cache mode)**
   * Jellygrail forces the continuous reading of the file to avoid multiple file open requests to the remote (with unrar t -sl12582912)
   * So the cache file is filled with useful data for later
-* When file is finished to be scanned, dynamic read-only takes place: it reads from either cache file or remote, depending on slice of data requested. **(this is "Read-Only" cache mode + "Direct source" mode)**
+* When file is finished being scanned, dynamic read-only takes place: it reads from either cache file or remote, depending on slice of data requested. **(this is "Read-Only" cache mode + "Direct source" mode)**
   * When ffprobe is reading the first 10mb of each file inside a RAR, it reads it directly from rclone cache and does not request it from remote.
   * when rar2fs lists RAR archive contents, it reads it directly from rclone cache and builds its index without requesting the remote for every file. So it makes up for the lack of rar2fs persistent index.
 
