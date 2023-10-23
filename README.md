@@ -15,9 +15,10 @@ There are 2 modes taking place sequentially when reading a RAR file:
   * So the cache file is filled with useful data for later
 * mode 2: When file is finished being scanned, dynamic read-only takes place: it reads from either cache file or remote, depending on slice of data requested. **(this is "Read-Only" cache mode + "Direct source" mode)**. 
 Below are few examples:
-  * When ffprobe is reading the first 10mb of each file inside a RAR, it reads it directly from rclone cache and does not request it from remote.
+  * When ffprobe is reading the first 10mb of each file inside a RAR, it reads it directly from rclone cache and does not request it from remote -> no more endless re-scans failing over and over again on RARs having a lot of assets
   * When rar2fs lists RAR archive contents, it reads it directly from rclone cache and builds its index without requesting the remote for every file. Indeed rar2fs has a file-index cache but its not persistent so this fork also makes up for this. In other words your rar2fs mount can now be killed without loosing the data needed to index what's inside the RAR files...
   * When kodi or jellyfin opens/scans a subtitle file, it reads it completely from cache, avoiding other multiple requests to the remote.
+  * When a Blu-ray disc has a lot of small files, fetching these does not hang-on the system due to remote ban.
 
 ## Other solution planned if possible:
 
