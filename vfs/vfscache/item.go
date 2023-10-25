@@ -1324,6 +1324,20 @@ func (item *Item) WriteAt(b []byte, off int64) (n int, err error) {
 func (item *Item) AllowDirectReadUpdate() bool {
 	cacheDonePath := "/jellygrail/cache_check"
 
+	// Extensions that directly triggers direct-read, TODO-jellygrail : take these allowed extensions from general config
+	// so in the end, every file are RW cached at some point but : 
+	// -video files are never RW-cached so are direct-read eventually
+	// -rar files are first RW-cached then RO-cached/direct-read thank to the flag provided by python script
+	allowedExtensions := []string{'.mkv', '.avi', '.mp4', '.mov', '.m2ts', '.ts', '.m4v', '.wmv', '.iso', '.vob', '.mpg'} 
+
+	// Vérifier si item.name se termine par une des extensions autorisées
+	for _, ext := range allowedExtensions {
+		if strings.HasSuffix(item.name, ext) {
+			item.allowDirectRead = true
+			return true
+		}
+	}
+
 	currentTime := time.Now()
 	// Check if we should recheck the file presence, i.e.,
 	// if it hasn't been checked yet or if it's been over 3 seconds since the last check
