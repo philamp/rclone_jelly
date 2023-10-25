@@ -269,7 +269,7 @@ func (fh *RWFileHandle) closeSource() error {
 	
 
 	if fh.opened {
-
+		var err error
 		// in dyn mode, deal with fh.openedCache as well
 		if fh.openedCache {
 			err = fh.item.Close(fh.file.setObject)
@@ -281,7 +281,7 @@ func (fh *RWFileHandle) closeSource() error {
 		}
 		// TODO-jellygrail: err overwrritten below, tofix
 			
-		var err error
+
 		defer func() {
 			fh.done(context.TODO(), err)
 		}()
