@@ -247,7 +247,6 @@ func (fh *RWFileHandle) close() (err error) {
 	if fh.opened {
 		err = fh.item.Close(fh.file.setObject)
 		fh.opened = false
-		fh.openedSource = false
 		fh.openedCache = false
 	} else {
 		// apply any pending mod times if any
@@ -266,8 +265,22 @@ func (fh *RWFileHandle) closeSource() error {
 		return ECLOSED
 	}
 	fh.closed = true
+	fh.openedSource = false
+	
 
 	if fh.opened {
+
+		// in dyn mode, deal with fh.openedCache as well
+		if fh.openedCache {
+			err = fh.item.Close(fh.file.setObject)
+			fh.opened = false
+			fh.openedCache = false
+			if !fh.readOnly() {
+				fh.file.delWriter(fh)
+			}
+		}
+		// TODO-jellygrail: err overwrritten below, tofix
+			
 		var err error
 		defer func() {
 			fh.done(context.TODO(), err)
@@ -282,6 +295,9 @@ func (fh *RWFileHandle) closeSource() error {
 		if err != nil {
 			return err
 		}
+
+		
+		
 	}
 	return nil
 }
@@ -313,6 +329,9 @@ func (fh *RWFileHandle) Flush() error {
 		return nil
 		
 	}else{
+		if fh.openedCache {
+			fh.updateSize()
+		}
 		
 		fh.mu.Lock()
 		defer fh.mu.Unlock()
@@ -564,7 +583,7 @@ func (fh *RWFileHandle) seek(offset int64, reopen bool) (err error) {
 
 // added from read.go and renamed with +Source
 func (fh *RWFileHandle) readAtSource(p []byte, off int64) (n int, err error) {
-	fs.Debugf("### read_write.go readAtSource CALLED ### (directsource) (atoffset=%s)", "")
+	fs.Debugf("### read_write.go readAtSource CALLED / DYN-MODE DIRECT confirmed ### %s", "")
 	// defer log.Trace(fh.remote, "p[%d], off=%d", len(p), off)("n=%d, err=%v", &n, &err)
 	err = fh.openPendingSource() // FIXME pending open could be more efficient in the presence of seek (and retries)
 	if err != nil {
@@ -664,8 +683,9 @@ func (fh *RWFileHandle) readAtSource(p []byte, off int64) (n int, err error) {
 func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
-	fs.Debugf("### read_write.go ReadAt CALLED ### (atoffset=%s)", "")
+	fs.Debugf("### read_write.go ReadAt CALLED / BEFORE-SWITCH ### ", "")
 	if(!fh.item.AllowDirectReadUpdate()){
+		fs.Debugf("### read_write.go ReadAt CALLED / FULL-MODE RW-CACHE ### ", "")
 		fh.currentDirectReadMode = false
 		return fh._readAt(b, off, true, false)
 	}else{
@@ -688,14 +708,14 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 		
 		if present {
 			// switch to a custom _readAt without cache write 
-			fs.Debugf("### DIRECT MODE / CACHE (read-only) ### %s", "")
+			fs.Debugf("### read_write.go ReadAt CALLED / DYN-MODE RO-CACHE ### %s", "")
 			// fh.item.info.ATime = time.Now()
 			// Do the reading with Item.mu unlocked and cache protected by preAccess -> not needed as we never delete the "partial" "cache" in this forked version
 			// return fh.item.fd.ReadAt(b, off) for going directly (deprecated)
 			// 4th arg true sets the _readAt to RO
 			return fh._readAt(b, off, true, true)
 		}
-		fs.Debugf("### DIRECT MODE / SOURCE ### %s", "")
+		fs.Debugf("### read_write.go ReadAt CALLED / DYN-MODE DIRECT ### %s", "")
 		// ---- jellygrail custom
 		
 		return fh.readAtSource(b, off)
@@ -706,7 +726,7 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 func (fh *RWFileHandle) Read(b []byte) (n int, err error) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
-	fs.Debugf("### read_write.go Read CALLED ### while fh.offset=%s", "")
+	fs.Debugf("### read_write.go Read CALLED NOT SUPPOSED TO BE ! ### %s", "")
 	if(!fh.item.AllowDirectReadUpdate()){
 		fh.currentDirectReadMode = false
 		n, err = fh._readAt(b, fh.offset, false, false)
@@ -731,7 +751,7 @@ func (fh *RWFileHandle) Read(b []byte) (n int, err error) {
 func (fh *RWFileHandle) Seek(offset int64, whence int) (ret int64, err error) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
-	fs.Debugf("### read_write.go Seek CALLED ### while fh.offset=%s", "")
+	fs.Debugf("### read_write.go Seek CALLED NOT SUPPOSED TO BE ! ### %s", "")
 
 	if(!fh.currentDirectReadMode){
 	
