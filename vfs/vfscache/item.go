@@ -1326,8 +1326,10 @@ func (item *Item) AllowDirectReadUpdate() bool {
 
 	// Extensions that directly triggers direct-read, TODO-jellygrail : take these allowed extensions from general config
 	// so in the end, every file are RW cached at some point but : 
-	// -video files are never RW-cached so are direct-read eventually
-	// -rar files are first RW-cached then RO-cached/direct-read thank to the flag provided by python script
+	// - video files are never RW-cached so are direct-read eventually
+	// - rar files are first RW-cached then RO-cached/direct-read thank to the flag provided by python script
+	// - all other files (srt etc...) are always RW-cached (decrease the number of request for non-rar torrents as well) 
+	// below table must be complete enough to avoid having video files RW-cached
 	allowedExtensions := []string{'.mkv', '.avi', '.mp4', '.mov', '.m2ts', '.ts', '.m4v', '.wmv', '.iso', '.vob', '.mpg'} 
 
 	// Vérifier si item.name se termine par une des extensions autorisées
