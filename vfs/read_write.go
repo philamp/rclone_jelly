@@ -385,7 +385,7 @@ func (fh *RWFileHandle) Release() error {
 			return nil
 		}
 		fs.Debugf(fh.remote, "ReadFileHandle.Release closing")
-		err := fh.close()
+		err := fh.closeSource()
 		if err != nil {
 			fs.Errorf(fh.remote, "ReadFileHandle.Release error: %v", err)
 		} else {
