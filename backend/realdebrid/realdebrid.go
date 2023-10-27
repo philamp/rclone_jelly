@@ -50,7 +50,7 @@ const (
 	rcloneClientID              = "X245A4XAIBGVM"
 	rcloneEncryptedClientSecret = "B5YIvQoRIhcpAYs8HYeyjb9gK-ftmZEbqdh_gNfc4RgO9Q"
 	minSleep                    = 10 * time.Millisecond
-	maxSleep                    = 2 * time.Second
+	maxSleep                    = 120 * time.Second
 	decayConstant               = 2   // bigger for slower decay, exponential
 	rootID                      = "0" // ID of root folder is always this
 	rootURL                     = "https://api.real-debrid.com/rest/1.0"
