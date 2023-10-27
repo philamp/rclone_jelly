@@ -586,7 +586,6 @@ func (fh *RWFileHandle) seek(offset int64, reopen bool) (err error) {
 
 // added from read.go and renamed with +Source
 func (fh *RWFileHandle) readAtSource(p []byte, off int64) (n int, err error) {
-	fs.Debugf("### read_write.go readAtSource CALLED / DYN-MODE DIRECT confirmed ### %s", "")
 	// defer log.Trace(fh.remote, "p[%d], off=%d", len(p), off)("n=%d, err=%v", &n, &err)
 	err = fh.openPendingSource() // FIXME pending open could be more efficient in the presence of seek (and retries)
 	if err != nil {
