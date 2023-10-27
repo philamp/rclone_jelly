@@ -43,7 +43,7 @@ type DefaultOption interface {
 func NewDefault(opts ...DefaultOption) *Default {
 	c := &Default{
 		minSleep:       10 * time.Millisecond,
-		maxSleep:       2 * time.Second,
+		maxSleep:       120 * time.Second,
 		decayConstant:  2,
 		attackConstant: 1,
 	}
