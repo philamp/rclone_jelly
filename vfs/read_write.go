@@ -243,8 +243,9 @@ func (fh *RWFileHandle) close() (err error) {
 	}
 
 	fh.closed = true
+	
 	fh.updateSize()
-	if fh.opened {
+	if fh.openedCache {
 		err = fh.item.Close(fh.file.setObject)
 		fh.opened = false
 		fh.openedCache = false
@@ -265,7 +266,7 @@ func (fh *RWFileHandle) closeSource() error {
 		return ECLOSED
 	}
 	fh.closed = true
-	fh.openedSource = false
+	
 	
 
 	if fh.opened {
@@ -281,21 +282,23 @@ func (fh *RWFileHandle) closeSource() error {
 		}
 		// TODO-jellygrail: err overwrritten below, tofix
 			
-
-		defer func() {
-			fh.done(context.TODO(), err)
-		}()
-		// Close first so that we have hashes
-		err = fh.r.Close()
-		if err != nil {
-			return err
+		if fh.openedSource {
+			fh.opened = false
+			fh.openedSource = false
+			defer func() {
+				fh.done(context.TODO(), err)
+			}()
+			// Close first so that we have hashes
+			err = fh.r.Close()
+			if err != nil {
+				return err
+			}
+			// Now check the hash
+			err = fh.checkHash()
+			if err != nil {
+				return err
+			}
 		}
-		// Now check the hash
-		err = fh.checkHash()
-		if err != nil {
-			return err
-		}
-
 		
 		
 	}
