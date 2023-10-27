@@ -687,27 +687,34 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
 	fs.Debugf("### read_write.go ReadAt CALLED / BEFORE-SWITCH ### ", "")
+
+	// jellygrail custom 
+	// ----- univeral switch 
+	// ------between fd.read and readAtSource when dynmode (got with fh.item.AllowDirectReadUpdate)
+	// ------between fd.read RW ahead and RW simple
+	offset := off
+	size := int64(len(b))
+	itemSize := fh._size()
+	if offset+size > itemSize {
+		size = itemSize - offset
+	}
+	// r := ranges.Range{Pos: offset, Size: size} DEPRECATED
+	
+	// present := fh.item.info.Rs.Present(r) DEPRECATED
+
+	present := fh.item.GetInfoRsPresent(offset, size)
+	
 	if(!fh.item.AllowDirectReadUpdate()){
 		fs.Debugf("### read_write.go ReadAt CALLED / FULL-MODE RW-CACHE ### ", "")
 		fh.currentDirectReadMode = false
-		return fh._readAt(b, off, true, false)
+		// TODO: test of RW ahead and RW simple
+		return fh._readAt(b, off, true, present) 
 	}else{
 		
 		fh.currentDirectReadMode = true
 
 		
-		// jellygrail custom ----- switch between fd.read and readAtSource
-		offset := off
-		size := int64(len(b))
-		itemSize := fh._size()
-		if offset+size > itemSize {
-			size = itemSize - offset
-		}
-		// r := ranges.Range{Pos: offset, Size: size} DEPRECATED
-		
-		// present := fh.item.info.Rs.Present(r) DEPRECATED
 
-		present := fh.item.GetInfoRsPresent(offset, size)
 		
 		if present {
 			// switch to a custom _readAt without cache write 
