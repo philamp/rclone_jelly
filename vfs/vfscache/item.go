@@ -1264,13 +1264,13 @@ func (item *Item) readAt(b []byte, off int64, DirectReadModeROCache bool) (n int
 	}
 	defer item.mu.Unlock()
 	if !DirectReadModeROCache {
-		fs.Debugf("### item.go readAt CALLED / FULL-MODE RW-CACHE confirmed ### %s", "")
+		// fs.Debugf("### item.go readAt CALLED / FULL-MODE RW-CACHE confirmed ### %s", "")
 		err = item._ensure(off, int64(len(b)))
 		if err != nil {
 			return 0, err
 		}
 	}else{
-		fs.Debugf("### item.go readAt CALLED / DYN-MODE RO-CACHE or FULL-MODE RO-CACHE confirmed ### %s", "")
+		// fs.Debugf("### item.go readAt CALLED / DYN-MODE RO-CACHE or FULL-MODE RO-CACHE confirmed ### %s", "")
 	}
 	
 	item.info.ATime = time.Now()
