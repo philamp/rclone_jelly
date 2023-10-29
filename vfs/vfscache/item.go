@@ -1331,7 +1331,7 @@ func (item *Item) AllowDirectReadUpdate() bool {
 	// - rar files are first RW-cached then RO-cached/direct-read thank to the flag provided by python script
 	// - all other files (srt etc...) are always RW-cached (decrease the number of request for non-rar torrents as well) 
 	// below table must be complete enough to avoid having video files RW-cached
-	allowedExtensions := []string{".mkv", ".avi", ".mp4", ".mov", ".m2ts", ".ts", ".m4v", ".wmv", ".iso", ".vob", ".mpg"} 
+	allowedExtensions := []string{".mkv", ".avi", ".mp4", ".mov", ".m2ts", ".ts", ".m4v", ".wmv", ".vob", ".mpg"} 
 
 	// Vérifier si item.name se termine par une des extensions autorisées
 	for _, ext := range allowedExtensions {
