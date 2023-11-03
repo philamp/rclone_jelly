@@ -800,8 +800,9 @@ func (item *Item) _checkObject(o fs.Object) error {
 			// remote object && local object
 			if remoteFingerprint != item.info.Fingerprint {
 				if !item.info.Dirty {
-					fs.Debugf(item.name, "vfs cache: removing cached entry as stale (remote fingerprint %q != cached fingerprint %q)", remoteFingerprint, item.info.Fingerprint)
-					item._remove("stale (remote is different)")
+					fs.Debugf(item.name, "vfs cache: JGCUSTOM : -NOT- removing cached entry as stale (remote fingerprint %q != cached fingerprint %q)", remoteFingerprint, item.info.Fingerprint)
+					// item._remove("stale (remote is different)") jellygrail custom : sometimes this is triggered by error, maybe the fingerprint returned by the remote is wrong and thus the cache is deleted. 
+					// We dont need to delete the cache in this fork as files are RO and don't change
 				} else {
 					fs.Debugf(item.name, "vfs cache: remote object has changed but local object modified - keeping it (remote fingerprint %q != cached fingerprint %q)", remoteFingerprint, item.info.Fingerprint)
 				}
