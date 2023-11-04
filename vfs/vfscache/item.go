@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 	"path/filepath"
-	"strings"
+	//"strings"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/fserrors"
