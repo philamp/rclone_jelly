@@ -1332,21 +1332,23 @@ func (item *Item) AllowDirectReadUpdate() bool {
 	// - rar files are first RW-cached then RO-cached/direct-read thank to the flag provided by python script
 	// - all other files (srt etc...) are always RW-cached (decrease the number of request for non-rar torrents as well) 
 	// below table must be complete enough to avoid having video files RW-cached
-	allowedExtensions := []string{".mkv", ".avi", ".mp4", ".mov", ".m2ts", ".ts", ".m4v", ".wmv", ".vob", ".mpg"} 
+	// allowedExtensions := []string{".mkv", ".avi", ".mp4", ".mov", ".m2ts", ".ts", ".m4v", ".wmv", ".vob", ".mpg"} 
 
 	// Vérifier si item.name se termine par une des extensions autorisées
-	for _, ext := range allowedExtensions {
-		if strings.HasSuffix(item.name, ext) {
-			item.allowDirectRead = true
-			return true
-		}
-	}
+	// for _, ext := range allowedExtensions {
+		// if strings.HasSuffix(item.name, ext) {
+			// item.allowDirectRead = true
+			// return true
+		// }
+	// }
 
-	currentTime := time.Now()
+
 	// Check if we should recheck the file presence, i.e.,
 	// if it hasn't been checked yet or if it's been over 3 seconds since the last check
-	shouldRecheck := item.lastCheckTime.IsZero() || currentTime.Sub(item.lastCheckTime) > 3*time.Second
+
 	if !item.allowDirectRead {
+		currentTime := time.Now()
+		shouldRecheck := item.lastCheckTime.IsZero() || currentTime.Sub(item.lastCheckTime) > 3*time.Second
 		if shouldRecheck {
 			item.lastCheckTime = currentTime
 			fs.Debugf("vfs cache: ITEM NAME : %s", item.name) // assuming fs is your logging package
