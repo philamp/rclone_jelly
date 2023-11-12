@@ -785,7 +785,8 @@ func (item *Item) _checkObject(o fs.Object) error {
 			// no remote object && local object
 			// remove local object unless dirty
 			if !item.info.Dirty {
-				item._remove("stale (remote deleted)")
+				// item._remove("stale (remote deleted)")
+				fs.Debugf(item.name, "vfs cache: remote object has gone but local object modified : JGCUSTOM : -NOT- removing it")
 			} else {
 				fs.Debugf(item.name, "vfs cache: remote object has gone but local object modified - keeping it")
 			}
