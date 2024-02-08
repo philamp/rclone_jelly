@@ -1325,7 +1325,7 @@ func (item *Item) WriteAt(b []byte, off int64) (n int, err error) {
 // TODO : if allowDirectRead is true, check deeper if we need to be in source mode or in cache mode (in the calling function ? by checking if offset requested is within downloaded ranges, if so, switch in cache mode)
 
 func (item *Item) AllowDirectReadUpdate() bool {
-	cacheDonePath := "/mounts/Cache_Check_Video_Library/cache_check"
+	cacheDonePath := "/Cache_Check_Video_Library/cache_check"
 
 	// Extensions that directly triggers direct-read, TODO-jellygrail : take these allowed extensions from general config
 	// so in the end, every file are RW cached at some point but : 
