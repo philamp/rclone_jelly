@@ -4,7 +4,7 @@
 ## An experimental cache system for improving rar2fs over rclone mount
 
 This is a fork of a fork.
-This fork is aimed to be used with jellygrail, an upcoming all-in-one solution to manage your sources of video assets based on a jellyfin package. **This is experimental as it changes the former purpose of rclone's cache.**
+This fork is aimed to be used with https://github.com/philamp/jellygrail, an experimental solution to merge and manage your local and remote sources of video assets, based on a jellyfin package. **This is experimental as it changes the former purpose of rclone's cache.**
 
 Its purpose is to provide a rar2fs index cache and a jellyfin/ffprobe cache to decrease real-debrid ban issues that happens when opening a lot of files and seeking a lot in the same RAR file.
 
