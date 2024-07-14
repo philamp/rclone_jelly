@@ -786,9 +786,9 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					result = append(result, ItemFile)
 				}
 			}
-			if f.opt.SharedFolder == "folders" {
+			/*if f.opt.SharedFolder == "folders" { not needed anymore as torrent is not taken from a tested range anmore
 				break
-			}
+			}*/ 
 			//fmt.Printf("Done.\n")
 		}
 	} else {
