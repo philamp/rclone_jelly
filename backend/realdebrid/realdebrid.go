@@ -705,6 +705,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					}
 				}
     			*/
+			var broken = false
 			for _, link := range torrent.Links {
 				var ItemFile api.Item
 				for _, cachedfile := range cached {
@@ -750,8 +751,8 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 				result = append(result, ItemFile)
 			}
 			if broken {
-				torrents[i] = f.redownloadTorrent(ctx, torrent)
-				torrent = torrents[i]
+				torrent = f.redownloadTorrent(ctx, torrent)
+				/*torrent = torrents[i]*/
 				for _, link := range torrent.Links {
 					var ItemFile api.Item
 					//fmt.Printf("Creating new unrestricted direct link for: '%s'\n", torrent.Name)
