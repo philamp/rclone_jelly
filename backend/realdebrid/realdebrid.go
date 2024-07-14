@@ -686,57 +686,69 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 
 		} else if f.opt.SharedFolder != "folders" || dirID != rootID {
 			//fmt.Printf("Matching Torrents to Direct Links ... ")
-			for i, torrent := range torrents {
+			var torrent api.Item
+			var method = "GET"
+			var path = "/torrents/info/" + dirID
+			var opts = rest.Opts{
+				Method:     method,
+				Path:       path,
+				Parameters: f.baseParams(),
+			}
+			_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
+			
+			/* put as comments but must be removed 
+   			for i, torrent := range torrents {
 				var broken = false
 				if f.opt.SharedFolder == "folders" {
 					if dirID != torrent.ID {
 						continue
 					}
 				}
-				for _, link := range torrent.Links {
-					var ItemFile api.Item
-					for _, cachedfile := range cached {
-						if cachedfile.OriginalLink == link {
-							ItemFile = cachedfile
-							break
-						}
+    			*/
+			for _, link := range torrent.Links {
+				var ItemFile api.Item
+				for _, cachedfile := range cached {
+					if cachedfile.OriginalLink == link {
+						ItemFile = cachedfile
+						break
 					}
-					if ItemFile.Link == "" {
-						//fmt.Printf("Creating new unrestricted direct link for: '%s'\n", torrent.Name)
-						path = "/unrestrict/link"
-						method = "POST"
-						opts := rest.Opts{
-							Method: method,
-							Path:   path,
-							MultipartParams: url.Values{
-								"link": {link},
-							},
-							Parameters: f.baseParams(),
-						}
-						var err_code = 0
+				}
+				if ItemFile.Link == "" {
+					//fmt.Printf("Creating new unrestricted direct link for: '%s'\n", torrent.Name)
+					path = "/unrestrict/link"
+					method = "POST"
+					opts := rest.Opts{
+						Method: method,
+						Path:   path,
+						MultipartParams: url.Values{
+							"link": {link},
+						},
+						Parameters: f.baseParams(),
+					}
+					var err_code = 0
+					resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
+					if resp != nil {
+						err_code = resp.StatusCode
+					}
+					if err_code == 503 {
+						broken = true
+						break
+					}
+					var retries = 0
+					for err_code == 429 && retries <= 5 {
+						time.Sleep(time.Duration(2) * time.Second)
 						resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
 						if resp != nil {
 							err_code = resp.StatusCode
 						}
-						if err_code == 503 {
-							broken = true
-							break
-						}
-						var retries = 0
-						for err_code == 429 && retries <= 5 {
-							time.Sleep(time.Duration(2) * time.Second)
-							resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
-							if resp != nil {
-								err_code = resp.StatusCode
-							}
-							retries += 1
-						}
+						retries += 1
 					}
-					ItemFile.ParentID = torrent.ID
-					ItemFile.TorrentHash = torrent.TorrentHash
-					ItemFile.Generated = torrent.Generated
-					result = append(result, ItemFile)
 				}
+				ItemFile.ParentID = torrent.ID
+				ItemFile.TorrentHash = torrent.TorrentHash
+				ItemFile.Generated = "2006-01-02T15:04:05.000Z"
+				result = append(result, ItemFile)
+			}
 				if broken {
 					torrents[i] = f.redownloadTorrent(ctx, torrent)
 					torrent = torrents[i]
@@ -769,7 +781,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 						}
 						ItemFile.ParentID = torrent.ID
 						ItemFile.TorrentHash = torrent.TorrentHash
-						ItemFile.Generated = torrent.Generated
+						ItemFile.Generated = "2006-01-02T15:04:05.000Z"
 						result = append(result, ItemFile)
 					}
 				}
