@@ -749,45 +749,44 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 				ItemFile.Generated = "2006-01-02T15:04:05.000Z"
 				result = append(result, ItemFile)
 			}
-				if broken {
-					torrents[i] = f.redownloadTorrent(ctx, torrent)
-					torrent = torrents[i]
-					for _, link := range torrent.Links {
-						var ItemFile api.Item
-						//fmt.Printf("Creating new unrestricted direct link for: '%s'\n", torrent.Name)
-						path = "/unrestrict/link"
-						method = "POST"
-						opts := rest.Opts{
-							Method: method,
-							Path:   path,
-							MultipartParams: url.Values{
-								"link": {link},
-							},
-							Parameters: f.baseParams(),
-						}
-						var err_code = 0
+			if broken {
+				torrents[i] = f.redownloadTorrent(ctx, torrent)
+				torrent = torrents[i]
+				for _, link := range torrent.Links {
+					var ItemFile api.Item
+					//fmt.Printf("Creating new unrestricted direct link for: '%s'\n", torrent.Name)
+					path = "/unrestrict/link"
+					method = "POST"
+					opts := rest.Opts{
+						Method: method,
+						Path:   path,
+						MultipartParams: url.Values{
+							"link": {link},
+						},
+						Parameters: f.baseParams(),
+					}
+					var err_code = 0
+					resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
+					if resp != nil {
+						err_code = resp.StatusCode
+					}
+					var retries = 0
+					for err_code == 429 && retries <= 5 {
+						time.Sleep(time.Duration(2) * time.Second)
 						resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
 						if resp != nil {
 							err_code = resp.StatusCode
 						}
-						var retries = 0
-						for err_code == 429 && retries <= 5 {
-							time.Sleep(time.Duration(2) * time.Second)
-							resp, _ = f.srv.CallJSON(ctx, &opts, nil, &ItemFile)
-							if resp != nil {
-								err_code = resp.StatusCode
-							}
-							retries += 1
-						}
-						ItemFile.ParentID = torrent.ID
-						ItemFile.TorrentHash = torrent.TorrentHash
-						ItemFile.Generated = "2006-01-02T15:04:05.000Z"
-						result = append(result, ItemFile)
+						retries += 1
 					}
+					ItemFile.ParentID = torrent.ID
+					ItemFile.TorrentHash = torrent.TorrentHash
+					ItemFile.Generated = "2006-01-02T15:04:05.000Z"
+					result = append(result, ItemFile)
 				}
-				if f.opt.SharedFolder == "folders" {
-					break
-				}
+			}
+			if f.opt.SharedFolder == "folders" {
+				break
 			}
 			//fmt.Printf("Done.\n")
 		}
