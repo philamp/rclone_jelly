@@ -752,7 +752,13 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			}
 			if broken {
 				torrent = f.redownloadTorrent(ctx, torrent)
-				/*torrent = torrents[i]*/
+				// and to be sure its functionnaly ISO to previous version that was working before RD breaking change, even if it does not seem mandatory, but dunno yet:
+	   			for i, torrenti := range torrents {
+					if dirID == torrenti.ID {
+						torrents[i] = torrent
+					}
+				}
+				
 				for _, link := range torrent.Links {
 					var ItemFile api.Item
 					//fmt.Printf("Creating new unrestricted direct link for: '%s'\n", torrent.Name)
