@@ -209,6 +209,7 @@ func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, err
 // readMetaDataForPath reads the metadata from the path
 func (f *Fs) readMetaDataForPath(ctx context.Context, path string, directoriesOnly bool, filesOnly bool) (info *api.Item, err error) {
 	// defer fs.Trace(f, "path=%q", path)("info=%+v, err=%v", &info, &err)
+	fmt.Printf("stating '%s'", path)
 	leaf, directoryID, err := f.dirCache.FindPath(ctx, path, false)
 	if err != nil {
 		if err == fs.ErrorDirNotFound {
@@ -217,7 +218,9 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, path string, directoriesOn
 		return nil, err
 	}
 
+
 	lcLeaf := strings.ToLower(leaf)
+	fmt.Printf("...with listAll\n")
 	_, found, err := f.listAll(ctx, directoryID, directoriesOnly, filesOnly, func(item *api.Item) bool {
 		if strings.ToLower(item.Name) == lcLeaf {
 			info = item
@@ -368,8 +371,9 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 }
 
 // FindLeaf finds a directory of name leaf in the folder with ID pathID
-func (f *Fs) FindLeaf(ctx context.Context, pathID, leaf string) (pathIDOut string, found bool, err error) {
+func (f *Fs) FindLeaf(ctx context.Context, pathID string, leaf string) (pathIDOut string, found bool, err error) {
 	// Find the leaf in pathID
+	fmt.Printf("Finding directory named: '%s' in dir named: '%s'\n", leaf, pathID)
 	var newDirID string
 	newDirID, found, err = f.listAll(ctx, pathID, true, false, func(item *api.Item) bool {
 		if strings.EqualFold(item.Name, leaf) {
@@ -519,6 +523,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 	var resp *http.Response
 	if f.opt.RootFolderID == "torrents" {
 		if dirID == rootID {
+			fmt.Printf("Listing rclone mount root so updating torrents and links if more than 15 min or torrents len has changed \n")
 			//update global cached list
 			opts := rest.Opts{
 				Method:     method,
@@ -553,7 +558,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					if err == nil {
 						if totalcount != len(cached) || time.Now().Unix()-lastcheck > interval {
 							if time.Now().Unix()-lastcheck > interval && !printed {
-								fmt.Println("Last update more than 15min ago. Updating links and torrents.")
+								fmt.Println("Last update more than 15min ago. Updating links and maybe torrents.")
 								printed = true
 							}
 							newcached = append(newcached, partialresult...)
@@ -603,6 +608,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					totalcount, err = strconv.Atoi(resp.Header["X-Total-Count"][0])
 					if err == nil {
 						if totalcount != len(torrents) || time.Now().Unix()-lastcheck > interval {
+							fmt.Printf("Really Updating torrents array because > 15mn last check or total count has changed\n")
 							newtorrents = append(newtorrents, partialresult...)
 							opts.Parameters.Set("offset", strconv.Itoa(len(newtorrents)))
 							opts.Parameters.Set("limit", "2500")
@@ -651,6 +657,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 				}
 			}
 		} else if f.opt.SharedFolder == "folders" && (dirID == "shows" || dirID == "movies" || dirID == "default") {
+			fmt.Println("Listing whats inside movies shows or default folders")
 			var artificialType []api.Item
 			if dirID == "shows" {
 				r, _ := regexp.Compile(f.opt.RegexShows) //(?i)(S[0-9]{2}|SEASON|COMPLETE)
@@ -686,16 +693,18 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			}
 
 		} else if f.opt.SharedFolder != "folders" || dirID != rootID {
-			//fmt.Printf("Matching Torrents to Direct Links ... ")
+			fmt.Printf("Listing the contents of a torrent release")
 			var torrent api.Item
 			for _, torrentwf := range torrentswf {
 				if dirID == torrentwf.ID {
 					torrent = torrentwf
-					break
+					fmt.Printf("...without the API\n")
+					break		
 				}
 			}
 
 			if torrent.ID == "" {
+				fmt.Printf("...using the API\n")
 				// it means it does not exist yet
 				var method = "GET"
 				var path = "/torrents/info/" + dirID
@@ -732,7 +741,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					}
 				}
 				if ItemFile.Link == "" {
-					//fmt.Printf("Creating new unrestricted direct link for: '%s'\n", torrent.Name)
+					fmt.Printf("First link unrestriction for torrent: '%s'\n", torrent.Name)
 					path = "/unrestrict/link"
 					method = "POST"
 					opts := rest.Opts{
@@ -778,7 +787,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 				
 				for _, link := range torrent.Links {
 					var ItemFile api.Item
-					//fmt.Printf("Creating new unrestricted direct link for: '%s'\n", torrent.Name)
+					fmt.Printf("Recreating unrestricted link after fixing broken torrent: '%s'\n", torrent.Name)
 					path = "/unrestrict/link"
 					method = "POST"
 					opts := rest.Opts{
@@ -812,7 +821,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			/*if f.opt.SharedFolder == "folders" { not needed anymore as torrent is not taken from a tested range anmore
 				break
 			}*/ 
-			//fmt.Printf("Done.\n")
+			fmt.Printf("Any Readdir done.\n")
 		}
 	} else {
 		opts := rest.Opts{
