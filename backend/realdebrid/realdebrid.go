@@ -779,9 +779,11 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			if broken {
 				torrent = f.redownloadTorrent(ctx, torrent)
 				// and put it back in torretswf array
-	   			for i, torrentwf := range torrentswf {
-					if dirID == torrentwf.ID {
-						torrentswf[i] = torrentwf
+				if torrent.ID != "" {
+		   			for i, torrentwf := range torrentswf {
+						if torrent.ID == torrentwf.ID {
+							torrentswf[i] = torrent
+						}
 					}
 				}
 				
