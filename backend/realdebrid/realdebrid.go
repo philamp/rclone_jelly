@@ -523,7 +523,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 	var resp *http.Response
 	if f.opt.RootFolderID == "torrents" {
 		if dirID == rootID {
-			fmt.Printf("Listing rclone mount root so updating torrents and links if more than 15 min or torrents len has changed \n")
+			fmt.Printf("--- Listing rclone mount root --- \n")
 			//update global cached list
 			opts := rest.Opts{
 				Method:     method,
@@ -539,6 +539,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			for len(newcached) < totalcount {
 				partialresult = nil
 				var err_code = 0
+				fmt.Printf("...with one API call to links to check Links length\n")
 				resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
 				if resp != nil {
 					err_code = resp.StatusCode
@@ -557,8 +558,8 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					totalcount, err = strconv.Atoi(resp.Header["X-Total-Count"][0])
 					if err == nil {
 						if totalcount != len(cached) || time.Now().Unix()-lastcheck > interval {
-							if time.Now().Unix()-lastcheck > interval && !printed {
-								fmt.Println("Last update more than 15min ago. Updating links and maybe torrents.")
+							if !printed {
+								fmt.Println("--> Last update more than 15min ago or length changed. Updating links.")
 								printed = true
 							}
 							newcached = append(newcached, partialresult...)
@@ -587,9 +588,11 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			opts.Parameters.Set("limit", "1")
 			var newtorrents []api.Item
 			totalcount = 2
+			var tprinted = false
 			for len(newtorrents) < totalcount {
 				partialresult = nil
 				var err_code = 0
+				fmt.Printf("...with one API call to links to check Torrents length\n")
 				resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
 				if resp != nil {
 					err_code = resp.StatusCode
@@ -608,7 +611,10 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					totalcount, err = strconv.Atoi(resp.Header["X-Total-Count"][0])
 					if err == nil {
 						if totalcount != len(torrents) || time.Now().Unix()-lastcheck > interval {
-							fmt.Printf("Really Updating torrents array because > 15mn last check or total count has changed\n")
+							if !tprinted{
+								fmt.Printf("--> Last update more than 15min ago or length changed. Updating torrents.\n")
+								tprinted = true
+							}
 							newtorrents = append(newtorrents, partialresult...)
 							opts.Parameters.Set("offset", strconv.Itoa(len(newtorrents)))
 							opts.Parameters.Set("limit", "2500")
