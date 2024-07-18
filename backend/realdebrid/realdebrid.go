@@ -536,10 +536,11 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			var totalcount int
 			var printed = false
 			totalcount = 2
+			fmt.Printf("...with one API call to /downloads to check Links total\n")
 			for len(newcached) < totalcount {
 				partialresult = nil
 				var err_code = 0
-				fmt.Printf("...with one API call to links to check Links length\n")
+
 				resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
 				if resp != nil {
 					err_code = resp.StatusCode
@@ -559,7 +560,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					if err == nil {
 						if totalcount != len(cached) || time.Now().Unix()-lastcheck > interval {
 							if !printed {
-								fmt.Println("--> Last update more than 15min ago or length changed. Updating links.")
+								fmt.Println("--> Last update more than 15min ago or total changed. Updating links.")
 								printed = true
 							}
 							newcached = append(newcached, partialresult...)
@@ -589,10 +590,11 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			var newtorrents []api.Item
 			totalcount = 2
 			var tprinted = false
+			fmt.Printf("...with one API call to /torrents to check Torrents total\n")
 			for len(newtorrents) < totalcount {
 				partialresult = nil
 				var err_code = 0
-				fmt.Printf("...with one API call to links to check Torrents length\n")
+
 				resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
 				if resp != nil {
 					err_code = resp.StatusCode
@@ -612,7 +614,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					if err == nil {
 						if totalcount != len(torrents) || time.Now().Unix()-lastcheck > interval {
 							if !tprinted{
-								fmt.Printf("--> Last update more than 15min ago or length changed. Updating torrents.\n")
+								fmt.Printf("--> Last update more than 15min ago or total changed. Updating torrents.\n")
 								tprinted = true
 							}
 							newtorrents = append(newtorrents, partialresult...)
