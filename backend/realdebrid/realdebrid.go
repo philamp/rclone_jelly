@@ -76,6 +76,7 @@ var (
 //To limit api calls all pages are stored here and are only updated on changes in the total length
 var cached []api.Item
 var torrents []api.Item
+var torrentswf []api.Item
 var broken_torrents []string
 var lastcheck int64 = time.Now().Unix()
 var interval int64 = 15 * 60
@@ -687,14 +688,30 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 		} else if f.opt.SharedFolder != "folders" || dirID != rootID {
 			//fmt.Printf("Matching Torrents to Direct Links ... ")
 			var torrent api.Item
-			var method = "GET"
-			var path = "/torrents/info/" + dirID
-			var opts = rest.Opts{
-				Method:     method,
-				Path:       path,
-				Parameters: f.baseParams(),
+			for i, torrentwf := range torrentswf {
+				if dirID == torrentwf.ID {
+					torrent = torrentwf
+					break
+				}
 			}
-			_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
+
+			if torrent.ID == "" {
+				// it means it does not exist yet
+				var method = "GET"
+				var path = "/torrents/info/" + dirID
+				var opts = rest.Opts{
+					Method:     method,
+					Path:       path,
+					Parameters: f.baseParams(),
+				}
+				_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent) 
+				// could be left as is in JellyGrail as it adds file in BindFS a transactionnal way, if empty, will got it at next scan.
+
+				torrentswf = append(torrentswf, torrent)
+			}
+			
+			
+
 			
 			/* put as comments but must be removed 
    			for i, torrent := range torrents {
@@ -752,10 +769,10 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			}
 			if broken {
 				torrent = f.redownloadTorrent(ctx, torrent)
-				// and to be sure its functionnaly ISO to previous version that was working before RD breaking change, even if it does not seem mandatory, but dunno yet:
-	   			for i, torrenti := range torrents {
-					if dirID == torrenti.ID {
-						torrents[i] = torrent
+				// and put it back in torretswf array
+	   			for i, torrentwf := range torrentswf {
+					if dirID == torrentwf.ID {
+						torrentswf[i] = torrentwf
 					}
 				}
 				
