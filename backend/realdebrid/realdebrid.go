@@ -783,6 +783,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 		   			for i, torrentwf := range torrentswf {
 						if torrent.ID == torrentwf.ID {
 							torrentswf[i] = torrent
+							break
 						}
 					}
 				}
