@@ -688,7 +688,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 		} else if f.opt.SharedFolder != "folders" || dirID != rootID {
 			//fmt.Printf("Matching Torrents to Direct Links ... ")
 			var torrent api.Item
-			for i, torrentwf := range torrentswf {
+			for _, torrentwf := range torrentswf {
 				if dirID == torrentwf.ID {
 					torrent = torrentwf
 					break
