@@ -158,6 +158,7 @@ type Object struct {
 	mimeType    string    // Mime type of object
 	url         string    // URL to download file
 	TorrentHash string    // Torrent Hash
+	OriginalUrl	string    // Original link
 }
 
 // ------------------------------------------------------------
@@ -722,7 +723,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					Parameters: f.baseParams(),
 				}
 				_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent) 
-				// could be left as is in JellyGrail as it adds file in BindFS a transactionnal way, if empty, will got it at next scan.
+				// todo ? could be left as is in JellyGrail as it adds file in BindFS a transactionnal way, if empty, will got it at next scan.
 
 				torrentswf = append(torrentswf, torrent)
 			}
@@ -1205,6 +1206,7 @@ func (o *Object) setMetaData(info *api.Item) (err error) {
 	o.id = info.ID
 	o.mimeType = info.MimeType
 	o.url = info.Link
+	o.OriginalUrl = info.OriginalLink
 	o.ParentID = info.ParentID
 	o.TorrentHash = info.TorrentHash
 	return nil
@@ -1250,7 +1252,9 @@ func (o *Object) Storable() bool {
 
 // Open an object for read
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
+	fmt.Printf("-- Open : %s --\n",o.url)
 	if o.url == "" {
+		fmt.Println("00 - Url is empty, should not happen")
 		return nil, errors.New("can't download - no URL")
 	}
 	fs.FixRangeOption(options, o.size)
@@ -1267,6 +1271,111 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		if resp != nil {
 			err_code = resp.StatusCode
 		}
+		fmt.Printf("-- Open Error code is : %d --\n",err_code)
+		if !fserrors.ShouldRetryHTTP(resp, retryErrorCodes) && err_code != 200 && err_code != 206 {
+			// it means it is a link to unrestrict again
+			fmt.Printf("0 - URL %s is down, need to unrestrict original link again\n", o.url)
+			// then go through cachedfile to find Originallink (o.OriginalUrl)
+			var broken = false
+			for i, cachedfile := range cached {
+
+
+				if cachedfile.Link == o.url {
+
+					// found the one badguy (could be several potentially but we break at the first one found)
+					fmt.Printf("1 - Try to delete from API the link id : %s\n", cachedfile.ID)
+					path := "/downloads/delete/" + cachedfile.ID
+					opts = rest.Opts{
+						Method:     "DELETE",
+						Path:       path,
+						Parameters: o.fs.baseParams(),
+					}
+					var resp *http.Response
+					var result api.Response
+					var retries = 0
+					var err_code = 0
+					resp, _ = o.fs.srv.CallJSON(ctx, &opts, nil, &result)
+					if resp != nil {
+						err_code = resp.StatusCode
+					}
+					for err_code == 429 && retries <= 5 {
+						time.Sleep(time.Duration(2) * time.Second)
+						resp, _ = o.fs.srv.CallJSON(ctx, &opts, nil, &result)
+						if resp != nil {
+							err_code = resp.StatusCode
+						}
+						retries += 1
+					}
+
+
+					// unrestrict to have new link
+					fmt.Printf("2 - Unrestrictlink with original link : %s\n", cachedfile.OriginalLink)
+					var tempFile api.Item
+					path = "/unrestrict/link"
+					method := "POST"
+					opts := rest.Opts{
+						Method: method,
+						Path:   path,
+						MultipartParams: url.Values{
+							"link": {cachedfile.OriginalLink},
+						},
+						Parameters: o.fs.baseParams(),
+					}
+					err_code = 0
+					resp, _ = o.fs.srv.CallJSON(ctx, &opts, nil, &tempFile)
+					if resp != nil {
+						err_code = resp.StatusCode
+					}
+					if err_code != 200 && err_code != 429 {
+						broken = true
+						break
+					}
+					retries = 0
+					for err_code == 429 && retries <= 5 {
+						time.Sleep(time.Duration(2) * time.Second)
+						resp, _ = o.fs.srv.CallJSON(ctx, &opts, nil, &tempFile)
+						if resp != nil {
+							err_code = resp.StatusCode
+						}
+						retries += 1
+					}
+
+
+					// replace in: opts, o. and cachedfile (so no need to reset lastcheck var)
+					alreadyTracked := false
+					if !broken && tempFile.Link != ""{
+						o.url = tempFile.Link
+						opts.RootURL = tempFile.Link // will right away retry with new rest opts
+						cached[i].Link = tempFile.Link // so no need to reload it from API
+					}else{
+						for _, TorrentID := range broken_torrents {
+							if o.ParentID == TorrentID {
+								alreadyTracked = true
+								fmt.Println("Live unrestriction failed for stalled link: '" + o.url + "'".)
+								fmt.Println(", Torrent broken and already tracked")
+							}
+						}
+						if !alreadyTracked{
+							fmt.Println("Live unrestriction failed for stalled link: '" + o.url + "'.")
+							fmt.Println(", so Torrent broken and added to tracked broken_torrents.")
+							broken_torrents = append(broken_torrents, o.ParentID)
+						}
+					}
+
+					break 
+				}
+
+
+			}
+
+			if !broken && opts.RootURL != ""{
+				return true, err // if unrestrict not broken and link not empty, it will retry with new URL value
+			}
+			
+		}
+
+
+
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
