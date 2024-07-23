@@ -18,6 +18,7 @@ canStream = true
 import (
 	"context"
 	"encoding/json"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"os"
 
 	"github.com/rclone/rclone/backend/realdebrid/api"
 	"github.com/rclone/rclone/fs"
@@ -310,6 +312,28 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	// Get rootID
 	f.dirCache = dircache.New(root, rootID, f)
 
+	// load torrentswf from file
+	file, err := os.Open("torrentswf.gob")
+	if err != nil {
+		fmt.Println("Error opening torrentswf file:", err)
+	}else{
+		// Create a Gob decoder
+		decoder := gob.NewDecoder(file)
+
+		// Create a map to hold the decoded data
+
+		// Decode the Gob data into the map
+		err = decoder.Decode(&torrentswf)
+		if err != nil {
+			fmt.Println("Error decoding torrentswf file data:", err)
+		}
+
+		fmt.Println("Data successfully read from torrentswf file:")
+	}
+	defer file.Close()
+
+
+
 	// Find the current root
 	err = f.dirCache.FindRoot(ctx, false)
 	if err != nil {
@@ -539,6 +563,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			totalcount = 2
 			fmt.Printf("...with one API call to /downloads to check Links total\n")
 			for len(newcached) < totalcount {
+				fmt.Printf("L")
 				partialresult = nil
 				var err_code = 0
 
@@ -567,6 +592,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 							newcached = append(newcached, partialresult...)
 							opts.Parameters.Set("offset", strconv.Itoa(len(newcached)))
 							opts.Parameters.Set("limit", "2500")
+
 						} else {
 							newcached = cached
 						}
@@ -577,6 +603,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					break
 				}
 			}
+			fmt.Printf("\n")
 			//fmt.Printf("Done.\n")
 			//fmt.Printf("Updating RealDebrid Torrents ... ")
 			cached = newcached
@@ -593,6 +620,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			var tprinted = false
 			fmt.Printf("...with one API call to /torrents to check Torrents total\n")
 			for len(newtorrents) < totalcount {
+				fmt.Printf("T")
 				partialresult = nil
 				var err_code = 0
 
@@ -631,9 +659,49 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					break
 				}
 			}
+			fmt.Printf("\n")
 			lastcheck = time.Now().Unix()
 			//fmt.Printf("Done.\n")
 			torrents = newtorrents
+
+			// remove from torrentswf where is not found in torrents only on complete refresh
+			if tprinted {
+
+				idsInT := make(map[string]struct{})
+				for _, item := range torrents {
+					idsInT[item.ID] = struct{}{}
+				}
+
+				var filteredtswf []api.Item
+				for _, item := range torrentswf {
+					if _, exists := idsInT[item.ID]; exists {
+						filteredtswf = append(filteredtswf, item)
+					}
+				}
+				torrentswf = filteredtswf
+
+				// dumping these torrentswf (torrents with files (torrents with original links))
+
+				file, err := os.Create("torrentswf.gob")
+				if err != nil {
+					fmt.Println("Error creating torrentswf file:", err)
+				}
+				defer file.Close()
+			
+				// Create a Gob encoder
+				encoder := gob.NewEncoder(file)
+			
+				// Encode the map and write to the file
+				err = encoder.Encode(torrentswf)
+				if err != nil {
+					fmt.Println("Error encoding torrentswf data:", err)
+				}
+			
+				fmt.Println("Data successfully written to torrentswf file.")
+
+	
+			}
+
 			//Handle dead torrents
 			var broken = false
 			for i, torrent := range torrents {
@@ -788,12 +856,10 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			if broken {
 				torrent = f.redownloadTorrent(ctx, torrent)
 				// and put it back in torretswf array
-				if torrent.ID != "" {
-		   			for i, torrentwf := range torrentswf {
-						if torrent.ID == torrentwf.ID {
-							torrentswf[i] = torrent
-							break
-						}
+				for i, torrentwf := range torrentswf {
+					if torrent.ID == torrentwf.ID {
+						torrentswf[i] = torrent
+						break
 					}
 				}
 				
@@ -833,7 +899,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			/*if f.opt.SharedFolder == "folders" { not needed anymore as torrent is not taken from a tested range anmore
 				break
 			}*/ 
-			fmt.Printf("Any Readdir done.\n")
+			fmt.Printf("Torrent Readdir done.\n")
 		}
 	} else {
 		opts := rest.Opts{
@@ -1351,12 +1417,12 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 						for _, TorrentID := range broken_torrents {
 							if o.ParentID == TorrentID {
 								alreadyTracked = true
-								fmt.Println("Live unrestriction failed for stalled link: '" + o.url + "'".)
-								fmt.Println(", Torrent broken and already tracked")
+								fmt.Println("Live unrestriction failed for stalled link: '" + o.url + "'")
+								fmt.Println(", Torrent broken and already tracked.")
 							}
 						}
 						if !alreadyTracked{
-							fmt.Println("Live unrestriction failed for stalled link: '" + o.url + "'.")
+							fmt.Println("Live unrestriction failed for stalled link: '" + o.url + "'")
 							fmt.Println(", so Torrent broken and added to tracked broken_torrents.")
 							broken_torrents = append(broken_torrents, o.ParentID)
 						}
