@@ -1379,6 +1379,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
+		/* this is already happened in above code
 		if err_code == 503 {
 			for _, TorrentID := range broken_torrents {
 				if o.ParentID == TorrentID {
@@ -1389,6 +1390,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 			fmt.Println("This link seems to be broken. Torrent will be re-downloaded on next refresh.")
 			broken_torrents = append(broken_torrents, o.ParentID)
 		}
+		*/
 		return nil, err
 	}
 	return resp.Body, err
