@@ -643,15 +643,11 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 				}
 				startup_cached_api_fetch = true
 				fmt.Printf("\n")
+				//cached = newcached
+				cached = append(newcached, cached...) // so links fetched are put at top of the cached array
 			}
-			//fmt.Printf("Done.\n")
-			//fmt.Printf("Updating RealDebrid Torrents ... ")
-			
-			
-			//cached = newcached
-			cached = append(newcached, cached...) // so links fetched are put at top of the cached array
 
-
+			
 			//get torrents
 			path = "/torrents"
 			opts = rest.Opts{
@@ -663,7 +659,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			var newtorrents []api.Item
 			totalcount = 2
 			var tprinted = false
-			fmt.Printf("...with one API call to /torrents to check Torrents total\n")
+			fmt.Printf("--- check Torrents total\n")
 			for len(newtorrents) < totalcount {
 				fmt.Printf("T\n")
 				partialresult = nil
@@ -783,7 +779,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 				if err != nil {
 					fmt.Println("Error encoding cached links data:", err)
 				}else{
-					fmt.Println("Data successfully written to cached.gob file (after alignement to torrentswf).")
+					fmt.Println("Data successfully written to cached.gob file (after alignement deduplication).")
 				}
 			
 
