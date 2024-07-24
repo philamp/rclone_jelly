@@ -51,7 +51,7 @@ import (
 const (
 	rcloneClientID              = "X245A4XAIBGVM"
 	rcloneEncryptedClientSecret = "B5YIvQoRIhcpAYs8HYeyjb9gK-ftmZEbqdh_gNfc4RgO9Q"
-	minSleep                    = 10 * time.Millisecond
+	minSleep                    = 250 * time.Millisecond // chnaged from value 10 to 250, should be aligned to RD's limit of 240 per minute (so 4 per second)
 	maxSleep                    = 3 * time.Second
 	decayConstant               = 2   // bigger for slower decay, exponential
 	rootID                      = "0" // ID of root folder is always this
@@ -82,6 +82,7 @@ var torrentswf []api.Item
 var broken_torrents []string
 var lastcheck int64 = time.Now().Unix()
 var interval int64 = 15 * 60
+var startup_cached_api_fetch bool = false // fetch the full /downloads API result already in this rclone session ?
 
 // Register with Fs
 func init() {
@@ -200,6 +201,20 @@ var retryErrorCodes = []int{
 	509, // Bandwidth Limit Exceeded
 }
 
+func removeDuplicates(slice []api.Item) []api.Item {
+    seen := make(map[string]bool)
+    result := []api.Item{}
+
+    for _, item := range slice {
+        if _, found := seen[item.OriginalLink]; !found {
+            seen[item.OriginalLink] = true
+            result = append(result, item)
+        }
+    }
+
+    return result
+}
+
 // shouldRetry returns a boolean as to whether this resp and err
 // deserve to be retried.  It returns the err as a convenience
 func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, error) {
@@ -313,24 +328,44 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	f.dirCache = dircache.New(root, rootID, f)
 
 	// load torrentswf from file
-	file, err := os.Open("torrentswf.gob")
+	filetwf, err := os.Open("torrentswf.gob")
 	if err != nil {
-		fmt.Println("Error opening torrentswf file:", err)
+		fmt.Println("torrentswf.gob dump does not exist yet (normal on very first start) or other error: ", err)
 	}else{
 		// Create a Gob decoder
-		decoder := gob.NewDecoder(file)
+		decoder := gob.NewDecoder(filetwf)
 
 		// Create a map to hold the decoded data
 
 		// Decode the Gob data into the map
 		err = decoder.Decode(&torrentswf)
 		if err != nil {
-			fmt.Println("Error decoding torrentswf file data:", err)
+			fmt.Println("Error decoding torrentswf.gob file data:", err)
 		}
 
-		fmt.Println("Data successfully read from torrentswf file:")
+		fmt.Println("Data successfully read from torrentswf.gob file:")
 	}
-	defer file.Close()
+	defer filetwf.Close()
+
+	// load cached from file
+	filecached, err := os.Open("cached.gob")
+	if err != nil {
+		fmt.Println("cached.gob dump does not exist yet (normal on very first start) or other error: ", err)
+	}else{
+		// Create a Gob decoder
+		decodercached := gob.NewDecoder(filecached)
+
+		// Create a map to hold the decoded data
+
+		// Decode the Gob data into the map
+		err = decodercached.Decode(&cached)
+		if err != nil {
+			fmt.Println("Error decoding cached.gob file data:", err)
+		}
+
+		fmt.Println("Data successfully read from cached.gob file:")
+	}
+	defer filecached.Close()
 
 
 
@@ -561,52 +596,62 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			var totalcount int
 			var printed = false
 			totalcount = 2
-			fmt.Printf("...with one API call to /downloads to check Links total\n")
-			for len(newcached) < totalcount {
-				fmt.Printf("L")
-				partialresult = nil
-				var err_code = 0
-
-				resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
-				if resp != nil {
-					err_code = resp.StatusCode
-				}
-				var retries = 0
-				for err_code == 429 && retries <= 5 {
+			if !startup_cached_api_fetch{
+				fmt.Printf("--> Rclone Start. Enriching known links with API ones.\n")
+				for len(newcached) < totalcount {
+					fmt.Printf("L\n")
 					partialresult = nil
-					time.Sleep(time.Duration(2) * time.Second)
+					var err_code = 0
+
 					resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
 					if resp != nil {
 						err_code = resp.StatusCode
 					}
-					retries += 1
-				}
-				if err == nil {
-					totalcount, err = strconv.Atoi(resp.Header["X-Total-Count"][0])
+					var retries = 0
+					for err_code == 429 && retries <= 5 {
+						partialresult = nil
+						time.Sleep(time.Duration(2) * time.Second)
+						resp, err = f.srv.CallJSON(ctx, &opts, nil, &partialresult)
+						if resp != nil {
+							err_code = resp.StatusCode
+						}
+						retries += 1
+					}
 					if err == nil {
-						if totalcount != len(cached) || time.Now().Unix()-lastcheck > interval {
-							if !printed {
-								fmt.Println("--> Last update more than 15min ago or total changed. Updating links.")
-								printed = true
-							}
-							newcached = append(newcached, partialresult...)
-							opts.Parameters.Set("offset", strconv.Itoa(len(newcached)))
-							opts.Parameters.Set("limit", "2500")
+						totalcount, err = strconv.Atoi(resp.Header["X-Total-Count"][0])
+						if err == nil {
+							if (totalcount != len(cached) || time.Now().Unix()-lastcheck > interval) { // timecheck is now useless : todo remove
+								if !printed {
+									fmt.Println("--> Rclone Start. Enriching known links with API ones.") // fetch only on rclone restart to profit from any links there that we wouldn't already have in dump, will be deduplicated later
+									printed = true
+								}
+								
+								newcached = append(newcached, partialresult...)
+								fmt.Printf("links get offset is %d\n", len(newcached))
+								opts.Parameters.Set("offset", strconv.Itoa(len(newcached)))
+								opts.Parameters.Set("limit", "2500")
 
+							} else {
+								newcached = cached
+							}
 						} else {
-							newcached = cached
+							break
 						}
 					} else {
 						break
 					}
-				} else {
-					break
 				}
+				startup_cached_api_fetch = true
+				fmt.Printf("\n")
 			}
-			fmt.Printf("\n")
 			//fmt.Printf("Done.\n")
 			//fmt.Printf("Updating RealDebrid Torrents ... ")
-			cached = newcached
+			
+			
+			//cached = newcached
+			cached = append(newcached, cached...) // so links fetched are put at top of the cached array
+
+
 			//get torrents
 			path = "/torrents"
 			opts = rest.Opts{
@@ -620,7 +665,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			var tprinted = false
 			fmt.Printf("...with one API call to /torrents to check Torrents total\n")
 			for len(newtorrents) < totalcount {
-				fmt.Printf("T")
+				fmt.Printf("T\n")
 				partialresult = nil
 				var err_code = 0
 
@@ -647,6 +692,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 								tprinted = true
 							}
 							newtorrents = append(newtorrents, partialresult...)
+							fmt.Printf("torrent get offset is %d\n", len(newtorrents))
 							opts.Parameters.Set("offset", strconv.Itoa(len(newtorrents)))
 							opts.Parameters.Set("limit", "2500")
 						} else {
@@ -664,40 +710,83 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			//fmt.Printf("Done.\n")
 			torrents = newtorrents
 
-			// remove from torrentswf where is not found in torrents only on complete refresh
+			
 			if tprinted {
+				// ------------- CLEANING AND DUMPING IS HERE only on complete refresh -------------
+				fmt.Println("---CLEANING AND DUMPING---")
 
+				// remove from torrentswf where is not found in torrents 
 				idsInT := make(map[string]struct{})
-				for _, item := range torrents {
-					idsInT[item.ID] = struct{}{}
+				for _, itemt := range torrents {
+					idsInT[itemt.ID] = struct{}{}
 				}
-
 				var filteredtswf []api.Item
-				for _, item := range torrentswf {
-					if _, exists := idsInT[item.ID]; exists {
-						filteredtswf = append(filteredtswf, item)
+				for _, itemtwf := range torrentswf {
+					if _, exists := idsInT[itemtwf.ID]; exists {
+						filteredtswf = append(filteredtswf, itemtwf)
 					}
 				}
 				torrentswf = filteredtswf
 
-				// dumping these torrentswf (torrents with files (torrents with original links))
+				// for the moment, only remove deplicates from cached
+				cached = removeDuplicates(cached)
 
-				file, err := os.Create("torrentswf.gob")
+				// clean cached not corresponding to any torrentswf original link, only possible if for every ID found in torrents, torrentswf has it ! todo !!
+				/*
+				idsInTwf := make(map[string]struct{})
+				for _, itemwf := range torrentswf {
+					for _, olink := range itemwf.Links {
+						idsInTwf[olink] = struct{}{}
+					}
+				}
+				var filteredcached []api.Item
+				for _, itemcache := range cached {
+					if _, exists := idsInTwf[itemcache.OriginalLink]; exists {
+						filteredcached = append(filteredcached, itemcache)
+					}
+				}
+				*/
+
+
+
+
+				// dumping these torrentswf items (torrents with files (torrents with original links))
+				filetwf, err := os.Create("torrentswf.gob")
 				if err != nil {
 					fmt.Println("Error creating torrentswf file:", err)
 				}
-				defer file.Close()
+				defer filetwf.Close()
 			
 				// Create a Gob encoder
-				encoder := gob.NewEncoder(file)
+				encoder := gob.NewEncoder(filetwf)
 			
 				// Encode the map and write to the file
 				err = encoder.Encode(torrentswf)
 				if err != nil {
 					fmt.Println("Error encoding torrentswf data:", err)
+				}else{
+					fmt.Println("Data successfully written to torrentswf file (after alignement to torrents).")
+				}
+
+				// dumping these cached items (links from download or unrestrict)
+				filecached, err := os.Create("cached.gob")
+				if err != nil {
+					fmt.Println("Error creating cached.gob file:", err)
+				}
+				defer filecached.Close()
+			
+				// Create a Gob encoder
+				encodercached := gob.NewEncoder(filecached)
+			
+				// Encode the map and write to the file
+				err = encodercached.Encode(cached)
+				if err != nil {
+					fmt.Println("Error encoding cached links data:", err)
+				}else{
+					fmt.Println("Data successfully written to cached.gob file (after alignement to torrentswf).")
 				}
 			
-				fmt.Println("Data successfully written to torrentswf file.")
+
 
 	
 			}
@@ -791,7 +880,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					Parameters: f.baseParams(),
 				}
 				_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent) 
-				// todo ? could be left as is in JellyGrail as it adds file in BindFS a transactionnal way, if empty, will got it at next scan.
+				// todo ? could be left as is in JellyGrail as it adds file in BindFS a transactionnal way, if empty, will got it at next scan and info will be kept
 
 				torrentswf = append(torrentswf, torrent)
 			}
@@ -847,6 +936,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 						}
 						retries += 1
 					}
+					cached = append([]api.Item{ItemFile}, cached...) // add to the cached array, at the top
 				}
 				ItemFile.ParentID = torrent.ID
 				ItemFile.TorrentHash = torrent.TorrentHash
@@ -890,6 +980,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 						}
 						retries += 1
 					}
+					cached = append([]api.Item{ItemFile}, cached...) // add to the cached array, at the top
 					ItemFile.ParentID = torrent.ID
 					ItemFile.TorrentHash = torrent.TorrentHash
 					ItemFile.Generated = "2006-01-02T15:04:05.000Z"
@@ -1349,6 +1440,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 				if cachedfile.Link == o.url {
 
 					// found the one badguy (could be several potentially but we break at the first one found)
+					// we don't delete it from cached, it will be replaced in place
 					fmt.Printf("1 - Try to delete from API the link id : %s\n", cachedfile.ID)
 					path := "/downloads/delete/" + cachedfile.ID
 					opts = rest.Opts{
@@ -1412,7 +1504,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 					if !broken && tempFile.Link != ""{
 						o.url = tempFile.Link
 						opts.RootURL = tempFile.Link // will right away retry with new rest opts
-						cached[i].Link = tempFile.Link // so no need to reload it from API
+						cached[i].Link = tempFile.Link // so no need to add it at top of cached array
 					}else{
 						for _, TorrentID := range broken_torrents {
 							if o.ParentID == TorrentID {
