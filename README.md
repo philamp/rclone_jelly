@@ -27,7 +27,7 @@ There are 2 modes taking place sequentially when reading a RAR file:
 
 * mode 1: --vfs-cache-mode full normal behavior when the file is being discovered and scanned by jellygrail. **(this is "Read-Write" cache mode)**
   * Jellygrail forces ordered reading of the RAR file to avoid tangled multiple/parallel file open requests to the remote (thanks to ``unrar t -sl12582912`` that only reads headers/starting blocks of each file inside the rar + reads files that are less than 10mb, ~~all in the same file open session~~
-    * EDIT: Actually on client it looks like it's a single file open but from the remote there are multiple HTTP GET requests to seek at different file positions, but there are done once, in order and not in parallel, to avoid rate-limiting issues. 
+    * EDIT: Actually on client it looks like it's a single file open but from the remote there are multiple HTTP GET requests to seek at different file positions, but there are done once, sequentially and not in parallel, to avoid rate-limiting issues. 
   * So the cache file is filled with useful data for later
 * mode 2: When file is finished being scanned, dynamic read-only takes place: it reads from either cache file or remote, depending on slice of data requested. **(this is "Read-Only" cache mode + "Direct source" mode)**. 
 Below are few examples:
