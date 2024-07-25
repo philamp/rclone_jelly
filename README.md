@@ -36,6 +36,26 @@ Below are few examples:
   * When kodi or jellyfin opens/scans a subtitle file, it reads it completely from cache, avoiding other multiple requests to the remote.
   * When a Blu-ray disc has a lot of small files, it reads them all from cache and it does not hang-on the system due to remote ban due to lot of small requests.
 
+## Build
+
+````
+	apt-get update; \
+	apt-get install -y --no-install-recommends \
+		g++ \
+        	golang \
+        	libfuse-dev \
+		gcc \
+		libc6-dev \
+		make \
+		pkg-config
+
+````
+
+````
+CGO_ENABLED=0 make
+
+````
+
 ## Other solution planned if possible:
 
 * forking rar2fs to include a persistent cache
