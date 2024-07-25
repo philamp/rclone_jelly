@@ -5,7 +5,7 @@
 > - 3/ re-starting every rclone instance (jellygrail restarts overnight) is not optimal: **-> FIXED** with regular dump to file for ``/downloads`` and ``/torrent/info`` data. Only ``/torrents`` is fetched regularly.
 > - 4/ rclone_rd did not not know how to unrestrict links on the fly (or to fix bad unrestricted links). **-> FIXED**
 >   - And it will unrestrict only on very first listing and then keep the old link untill the user really opens the file. Huge difference from original rclone_rd. It decreases unrestricting calls a lot. Combined with jellygrail cache for RAR, ISO and ffprobe data, API endpoints and remote assets are rarely requested.
-> - 5/ Log file ``/jellygrail/log/remote_realdebrid`` is still very verbose to track any issue or abnormal API calls.
+> - 5/ sdtout is still very verbose to track any issue or abnormal API calls.
 > - 6/ The tuned cache system in this fork is only working when used with Jellygrail.
 >  
 > These Real Debrid related quirks are now **-> FIXED** for the most part and the little remainging ones will be soon
