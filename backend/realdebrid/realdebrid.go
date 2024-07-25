@@ -327,8 +327,19 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	// Get rootID
 	f.dirCache = dircache.New(root, rootID, f)
 
+	// create var/lib folder if necessary
+    pathdir := "/var/lib/rclone"
+    
+    // Create the directory, including any necessary parent directories
+    errdir := os.MkdirAll(pathdir, 0755)
+    if errdir != nil {
+        fmt.Println("Error creating the dir to store dumps", errdir)
+    }
+    
+    fmt.Println("Data dump Directory created successfully!")
+
 	// load torrentswf from file
-	filetwf, err := os.Open("torrentswf.gob")
+	filetwf, err := os.Open("/var/lib/rclone/torrentswf.gob")
 	if err != nil {
 		fmt.Println("torrentswf.gob dump does not exist yet (normal on very first start) or other error: ", err)
 	}else{
@@ -348,7 +359,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	defer filetwf.Close()
 
 	// load cached from file
-	filecached, err := os.Open("cached.gob")
+	filecached, err := os.Open("/var/lib/rclone/cached.gob")
 	if err != nil {
 		fmt.Println("cached.gob dump does not exist yet (normal on very first start) or other error: ", err)
 	}else{
@@ -747,7 +758,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 
 
 				// dumping these torrentswf items (torrents with files (torrents with original links))
-				filetwf, err := os.Create("torrentswf.gob")
+				filetwf, err := os.Create("/var/lib/rclone/torrentswf.gob")
 				if err != nil {
 					fmt.Println("Error creating torrentswf file:", err)
 				}
@@ -765,7 +776,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 				}
 
 				// dumping these cached items (links from download or unrestrict)
-				filecached, err := os.Create("cached.gob")
+				filecached, err := os.Create("/var/lib/rclone/cached.gob")
 				if err != nil {
 					fmt.Println("Error creating cached.gob file:", err)
 				}
