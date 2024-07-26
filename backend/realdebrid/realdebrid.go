@@ -856,7 +856,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					fmt.Println("DUMPING| dl-links dump in cached.gob file (after deduplication).")
 				}
 			
-				fmt.Printf("STATUS| - Number of accumulated dl-links (after refresh, deduplication and dumping todo:alignement): %d.\n", len(cached))
+				fmt.Printf("STATUS| - Number of accumulated dl-links (after deduplication and dumping todo:alignement): %d.\n", len(cached))
 				fmt.Printf("STATUS| - Number of managed Torrents (after refresh, not dumped): %d.\n", len(torrents))
 				fmt.Printf("STATUS| - Number of managed Torrents details (after alignement and dumping): %d.\n", len(torrentswf))
 
