@@ -82,7 +82,7 @@ var torrents []api.Item
 var torrentswf []api.Item
 var broken_torrents []string
 var lastcheck int64 = time.Now().Unix()
-var interval int64 = 1 * 60               // todo find a way to align to jellygrail python check
+var interval int64 = 15 * 60              // todo find a way to align to jellygrail python check
 var startup_cached_api_fetch bool = false // fetch the full /downloads API result already in this rclone session ?
 
 // Register with Fs
