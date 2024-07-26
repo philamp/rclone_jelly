@@ -1049,7 +1049,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			/*if f.opt.SharedFolder == "folders" { not needed anymore as torrent is not taken from a tested range anmore
 				break
 			}*/
-			fmt.Printf("...torrent listing done.\n")
+			//fmt.Printf("...torrent listing done.\n")
 		}
 	} else {
 		opts := rest.Opts{
