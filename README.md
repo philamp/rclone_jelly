@@ -11,7 +11,8 @@
 > - 5/ sdtout is still very verbose to track any issue or abnormal API calls.
 > - 6/ The tuned cache system in this fork is only working when used with Jellygrail.
 >  
-> These Real Debrid related quirks are now **-> FIXED** for the most part and the little remainging ones will be soon
+> These Real Debrid related quirks are now **-> FIXED**.
+> The only remaining issue seems to be that accumulated unrestricted links (accumulation is on purpose) are deduplicated but not aligned upon refreshed torrents list, so this array grows a little bit too much over time, but nothing to worry about in terms of execution speed and RAM. This will be fixed way before it becomes a problem.
 
 
 # Fork of "RClone_RD"
