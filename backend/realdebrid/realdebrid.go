@@ -246,7 +246,7 @@ func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, err
 // readMetaDataForPath reads the metadata from the path
 func (f *Fs) readMetaDataForPath(ctx context.Context, path string, directoriesOnly bool, filesOnly bool) (info *api.Item, err error) {
 	// defer fs.Trace(f, "path=%q", path)("info=%+v, err=%v", &info, &err)
-	fmt.Printf("stating '%s'", path)
+	//fmt.Printf("stating '%s'", path)
 	leaf, directoryID, err := f.dirCache.FindPath(ctx, path, false)
 	if err != nil {
 		if err == fs.ErrorDirNotFound {
@@ -256,7 +256,7 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, path string, directoriesOn
 	}
 
 	lcLeaf := strings.ToLower(leaf)
-	fmt.Printf("...with listAll\n")
+	//fmt.Printf("...with listAll\n")
 	_, found, err := f.listAll(ctx, directoryID, directoriesOnly, filesOnly, func(item *api.Item) bool {
 		if strings.ToLower(item.Name) == lcLeaf {
 			info = item
@@ -655,7 +655,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 
 						if err == nil {
 							if !printed {
-								fmt.Println("    | - RD API dl-link enrich on rclone load (enriching known dl-links with externally created ones).") // fetch only on rclone restart to profit from any links there that we wouldn't already have in dump, will be deduplicated later
+								fmt.Println("    | - RD API : enriching known dl-links with externally created ones.") // fetch only on rclone restart to profit from any links there that we wouldn't already have in dump, will be deduplicated later
 								printed = true
 							}
 							if ipage > 0 {
@@ -766,7 +766,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 
 			if tprinted {
 				// ------------- CLEANING AND DUMPING IS HERE only on complete refresh -------------
-				fmt.Println("---CLEANING AND DUMPING---")
+				//fmt.Println("---CLEANING AND DUMPING---")
 
 				// dont remove duplicates from torrents as count comparison will trigger a new refresh anyway ? todo verif
 
@@ -847,9 +847,9 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					fmt.Println("DUMPING| dl-links dump in cached.gob file.")
 				}
 
-				fmt.Printf("STATUS| - Number of accumulated dl-links (after deduplication and dumping ; todo:alignement): %d.\n", len(cached))
-				fmt.Printf("STATUS| - Number of managed Torrents (after refresh, not dumped): %d.\n", len(torrents))
-				fmt.Printf("STATUS| - Number of managed Torrents details (after alignement to dled torrents, deduplication and dumping): %d.\n", len(torrentswf))
+				fmt.Printf("STATUS| - Number of accumulated dl-links (after deduplication ; todo:alignement): %d.\n", len(cached))
+				fmt.Printf("STATUS| - Number of managed Torrents (after refresh): %d.\n", len(torrents)) // simple torrent call is not dumped
+				fmt.Printf("STATUS| - Number of managed Torrents details (after alignement to dled torrents and deduplication): %d.\n", len(torrentswf))
 
 			}
 
@@ -885,7 +885,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 				}
 			}
 		} else if f.opt.SharedFolder == "folders" && (dirID == "shows" || dirID == "movies" || dirID == "default") {
-			fmt.Println("Listing whats inside movies shows or default folders")
+			//fmt.Println("Listing torrents folders")
 			var artificialType []api.Item
 			if dirID == "shows" {
 				r, _ := regexp.Compile(f.opt.RegexShows) //(?i)(S[0-9]{2}|SEASON|COMPLETE)
@@ -921,12 +921,12 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			}
 
 		} else if f.opt.SharedFolder != "folders" || dirID != rootID {
-			fmt.Printf("Listing the contents of a torrent release")
+			//fmt.Printf("Listing the contents of a torrent folder")
 			var torrent api.Item
 			for _, torrentwf := range torrentswf {
 				if dirID == torrentwf.ID && torrentwf.Status == "downloaded" {
 					torrent = torrentwf
-					fmt.Printf("                 ~ from cache\n")
+					//fmt.Printf("                 ~ from cache\n")
 					break
 				}
 			}
@@ -942,7 +942,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 				}
 				fmt.Printf("                ~ RDAPIRequest@ /torrent/info\n")
 				_, _ = f.srv.CallJSON(ctx, &opts, nil, &torrent)
-				// todo ? could be left as is in JellyGrail as it adds file in BindFS a transactionnal way, if empty, will got it at next scan and info will be kept
+				// todo retry if http fails ? could be left as is in JellyGrail as it adds file in BindFS a transactionnal way, if empty, will got it at next scan and info will be kept
 				// put at the top, duplicates will be removed later
 				torrentswf = append([]api.Item{torrent}, torrentswf...)
 			}
@@ -1467,9 +1467,9 @@ func (o *Object) Storable() bool {
 
 // Open an object for read
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
-	fmt.Printf("-- Open dl-link : %s --\n", o.url)
+	//fmt.Printf("-- Open dl-link : %s --\n", o.url)
 	if o.url == "" {
-		fmt.Println("00 - Url is empty, should not happen")
+		fmt.Println("00 - Url is empty, should theorically not happen")
 		return nil, errors.New("can't download - no URL")
 	}
 	fs.FixRangeOption(options, o.size)
@@ -1486,7 +1486,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		if resp != nil {
 			err_code = resp.StatusCode
 		}
-		fmt.Printf("-- Open HTTP code is : %d --\n", err_code)
+		//fmt.Printf("-- Open HTTP code is : %d --\n", err_code)
 		if !fserrors.ShouldRetryHTTP(resp, retryErrorCodes) && err_code != 200 && err_code != 206 {
 			// it means it is a link to unrestrict again
 			fmt.Printf("0 - URL %s is down, need to unrestrict original link again\n", o.url)
@@ -1498,7 +1498,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 
 					// found the one badguy (could be several potentially but we break at the first one found)
 					// we don't delete it from cached, it will be replaced in place
-					fmt.Printf("1 - Try to delete from RD API the link id : %s\n", cachedfile.ID)
+					//fmt.Printf("1 - Try to delete from RD API the link id : %s\n", cachedfile.ID)
 					path := "/downloads/delete/" + cachedfile.ID
 					opts = rest.Opts{
 						Method:     "DELETE",
