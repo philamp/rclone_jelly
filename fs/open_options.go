@@ -3,6 +3,7 @@
 package fs
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -40,10 +41,10 @@ type OpenOption interface {
 //
 // Examples:
 //
-//     RangeOption{Start: 0, End: 99} - fetch the first 100 bytes
-//     RangeOption{Start: 100, End: 199} - fetch the second 100 bytes
-//     RangeOption{Start: 100, End: -1} - fetch bytes from offset 100 to the end
-//     RangeOption{Start: -1, End: 100} - fetch the last 100 bytes
+//	RangeOption{Start: 0, End: 99} - fetch the first 100 bytes
+//	RangeOption{Start: 100, End: 199} - fetch the second 100 bytes
+//	RangeOption{Start: 100, End: -1} - fetch bytes from offset 100 to the end
+//	RangeOption{Start: -1, End: 100} - fetch the last 100 bytes
 //
 // A RangeOption implements a single byte-range-spec from
 // https://tools.ietf.org/html/rfc7233#section-2.1
@@ -72,28 +73,28 @@ func (o *RangeOption) Header() (key string, value string) {
 func ParseRangeOption(s string) (po *RangeOption, err error) {
 	const preamble = "bytes="
 	if !strings.HasPrefix(s, preamble) {
-		return nil, errors.New("Range: header invalid: doesn't start with " + preamble)
+		return nil, errors.New("range: header invalid: doesn't start with " + preamble)
 	}
 	s = s[len(preamble):]
-	if strings.IndexRune(s, ',') >= 0 {
-		return nil, errors.New("Range: header invalid: contains multiple ranges which isn't supported")
+	if strings.ContainsRune(s, ',') {
+		return nil, errors.New("range: header invalid: contains multiple ranges which isn't supported")
 	}
 	dash := strings.IndexRune(s, '-')
 	if dash < 0 {
-		return nil, errors.New("Range: header invalid: contains no '-'")
+		return nil, errors.New("range: header invalid: contains no '-'")
 	}
 	start, end := strings.TrimSpace(s[:dash]), strings.TrimSpace(s[dash+1:])
 	o := RangeOption{Start: -1, End: -1}
 	if start != "" {
 		o.Start, err = strconv.ParseInt(start, 10, 64)
 		if err != nil || o.Start < 0 {
-			return nil, errors.New("Range: header invalid: bad start")
+			return nil, errors.New("range: header invalid: bad start")
 		}
 	}
 	if end != "" {
 		o.End, err = strconv.ParseInt(end, 10, 64)
 		if err != nil || o.End < 0 {
-			return nil, errors.New("Range: header invalid: bad end")
+			return nil, errors.New("range: header invalid: bad end")
 		}
 	}
 	return &o, nil
@@ -197,6 +198,32 @@ func (o *SeekOption) Mandatory() bool {
 	return true
 }
 
+// ParseHeaders converts the strings passed in via the header flags into HTTPOptions
+func ParseHeaders(headers []string) ([]*HTTPOption, error) {
+	opts := []*HTTPOption{}
+	for _, header := range headers {
+		parts := strings.SplitN(header, ":", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("failed to parse %q as an HTTP header. Expecting a string like: 'Cache-Control: no-store'", header)
+		}
+		option := &HTTPOption{
+			Key:   strings.TrimSpace(parts[0]),
+			Value: strings.TrimSpace(parts[1]),
+		}
+		opts = append(opts, option)
+	}
+	return opts, nil
+}
+
+// MustParseHeaders converts the strings passed in via the header flags into HTTPOptions or exits.
+func MustParseHeaders(headers []string) []*HTTPOption {
+	opts, err := ParseHeaders(headers)
+	if err != nil {
+		Fatalf(nil, "%v", err)
+	}
+	return opts
+}
+
 // HTTPOption defines a general purpose HTTP option
 type HTTPOption struct {
 	Key   string
@@ -250,12 +277,59 @@ func (o NullOption) Header() (key string, value string) {
 
 // String formats the option into human-readable form
 func (o NullOption) String() string {
-	return fmt.Sprintf("NullOption()")
+	return "NullOption()"
 }
 
 // Mandatory returns whether the option must be parsed or can be ignored
 func (o NullOption) Mandatory() bool {
 	return false
+}
+
+// MetadataOption defines an Option which does nothing
+type MetadataOption Metadata
+
+// Header formats the option as an http header
+func (o MetadataOption) Header() (key string, value string) {
+	return "", ""
+}
+
+// String formats the option into human-readable form
+func (o MetadataOption) String() string {
+	return fmt.Sprintf("MetadataOption(%v)", Metadata(o))
+}
+
+// Mandatory returns whether the option must be parsed or can be ignored
+func (o MetadataOption) Mandatory() bool {
+	return false
+}
+
+// MetadataAsOpenOptions fetch any metadata to set as open options
+func MetadataAsOpenOptions(ctx context.Context) (options []OpenOption) {
+	ci := GetConfig(ctx)
+	if ci.MetadataSet != nil {
+		options = append(options, MetadataOption(ci.MetadataSet))
+	}
+	return options
+}
+
+// ChunkOption defines an Option which returns a preferred chunk size
+type ChunkOption struct {
+	ChunkSize int64
+}
+
+// Header formats the option as an http header
+func (o *ChunkOption) Header() (key string, value string) {
+	return "", ""
+}
+
+// Mandatory returns whether the option must be parsed or can be ignored
+func (o *ChunkOption) Mandatory() bool {
+	return false
+}
+
+// String formats the option into human-readable form
+func (o *ChunkOption) String() string {
+	return fmt.Sprintf("ChunkOption(%v)", o.ChunkSize)
 }
 
 // OpenOptionAddHeaders adds each header found in options to the

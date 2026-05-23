@@ -11,6 +11,11 @@ import (
 	"github.com/rclone/rclone/fstest/fstests"
 )
 
+var (
+	unimplementableFsMethods     = []string{"UnWrap", "WrapFs", "SetWrapper", "UserInfo", "Disconnect", "PublicLink", "PutUnchecked", "MergeDirs", "OpenWriterAt", "OpenChunkWriter", "ListP"}
+	unimplementableObjectMethods = []string{}
+)
+
 // TestIntegration runs integration tests against the remote
 func TestIntegration(t *testing.T) {
 	if *fstest.RemoteName == "" {
@@ -18,8 +23,8 @@ func TestIntegration(t *testing.T) {
 	}
 	fstests.Run(t, &fstests.Opt{
 		RemoteName:                   *fstest.RemoteName,
-		UnimplementableFsMethods:     []string{"OpenWriterAt", "DuplicateFiles"},
-		UnimplementableObjectMethods: []string{"MimeType"},
+		UnimplementableFsMethods:     unimplementableFsMethods,
+		UnimplementableObjectMethods: unimplementableObjectMethods,
 	})
 }
 
@@ -39,8 +44,9 @@ func TestStandard(t *testing.T) {
 			{Name: name, Key: "create_policy", Value: "epmfs"},
 			{Name: name, Key: "search_policy", Value: "ff"},
 		},
-		UnimplementableFsMethods:     []string{"OpenWriterAt", "DuplicateFiles"},
-		UnimplementableObjectMethods: []string{"MimeType"},
+		UnimplementableFsMethods:     unimplementableFsMethods,
+		UnimplementableObjectMethods: unimplementableObjectMethods,
+		QuickTestOK:                  true,
 	})
 }
 
@@ -60,8 +66,9 @@ func TestRO(t *testing.T) {
 			{Name: name, Key: "create_policy", Value: "epmfs"},
 			{Name: name, Key: "search_policy", Value: "ff"},
 		},
-		UnimplementableFsMethods:     []string{"OpenWriterAt", "DuplicateFiles"},
-		UnimplementableObjectMethods: []string{"MimeType"},
+		UnimplementableFsMethods:     unimplementableFsMethods,
+		UnimplementableObjectMethods: unimplementableObjectMethods,
+		QuickTestOK:                  true,
 	})
 }
 
@@ -81,8 +88,9 @@ func TestNC(t *testing.T) {
 			{Name: name, Key: "create_policy", Value: "epmfs"},
 			{Name: name, Key: "search_policy", Value: "ff"},
 		},
-		UnimplementableFsMethods:     []string{"OpenWriterAt", "DuplicateFiles"},
-		UnimplementableObjectMethods: []string{"MimeType"},
+		UnimplementableFsMethods:     unimplementableFsMethods,
+		UnimplementableObjectMethods: unimplementableObjectMethods,
+		QuickTestOK:                  true,
 	})
 }
 
@@ -102,8 +110,9 @@ func TestPolicy1(t *testing.T) {
 			{Name: name, Key: "create_policy", Value: "lus"},
 			{Name: name, Key: "search_policy", Value: "all"},
 		},
-		UnimplementableFsMethods:     []string{"OpenWriterAt", "DuplicateFiles"},
-		UnimplementableObjectMethods: []string{"MimeType"},
+		UnimplementableFsMethods:     unimplementableFsMethods,
+		UnimplementableObjectMethods: unimplementableObjectMethods,
+		QuickTestOK:                  true,
 	})
 }
 
@@ -123,8 +132,9 @@ func TestPolicy2(t *testing.T) {
 			{Name: name, Key: "create_policy", Value: "rand"},
 			{Name: name, Key: "search_policy", Value: "ff"},
 		},
-		UnimplementableFsMethods:     []string{"OpenWriterAt", "DuplicateFiles"},
-		UnimplementableObjectMethods: []string{"MimeType"},
+		UnimplementableFsMethods:     unimplementableFsMethods,
+		UnimplementableObjectMethods: unimplementableObjectMethods,
+		QuickTestOK:                  true,
 	})
 }
 
@@ -144,7 +154,8 @@ func TestPolicy3(t *testing.T) {
 			{Name: name, Key: "create_policy", Value: "all"},
 			{Name: name, Key: "search_policy", Value: "all"},
 		},
-		UnimplementableFsMethods:     []string{"OpenWriterAt", "DuplicateFiles"},
-		UnimplementableObjectMethods: []string{"MimeType"},
+		UnimplementableFsMethods:     unimplementableFsMethods,
+		UnimplementableObjectMethods: unimplementableObjectMethods,
+		QuickTestOK:                  true,
 	})
 }

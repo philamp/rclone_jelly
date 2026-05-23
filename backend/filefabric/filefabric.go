@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"path"
@@ -85,6 +84,7 @@ Leave blank normally.
 
 Fill in to make rclone start with directory of a given ID.
 `,
+			Sensitive: true,
 		}, {
 			Name: "permanent_token",
 			Help: `Permanent Authentication Token.
@@ -98,6 +98,7 @@ These tokens are normally valid for several years.
 
 For more info see: https://docs.storagemadeeasy.com/organisationcloud/api-tokens
 `,
+			Sensitive: true,
 		}, {
 			Name: "token",
 			Help: `Session Token.
@@ -107,7 +108,8 @@ usually valid for 1 hour.
 
 Don't set this value - rclone will set it automatically.
 `,
-			Advanced: true,
+			Advanced:  true,
+			Sensitive: true,
 		}, {
 			Name: "token_expiry",
 			Help: `Token expiry time.
@@ -150,15 +152,15 @@ type Fs struct {
 	opt             Options            // parsed options
 	features        *fs.Features       // optional features
 	m               configmap.Mapper   // to save config
-	srv             *rest.Client       // the connection to the one drive server
+	srv             *rest.Client       // the connection to the server
 	dirCache        *dircache.DirCache // Map of directory path to directory id
 	pacer           *fs.Pacer          // pacer for API calls
 	tokenMu         sync.Mutex         // hold when reading the token
 	token           string             // current access token
 	tokenExpiry     time.Time          // time the current token expires
-	tokenExpired    int32              // read and written with atomic
-	canCopyWithName bool               // set if detected that can use fi_name in copy
-	precision       time.Duration      // precision reported
+	tokenExpired    atomic.Int32
+	canCopyWithName bool          // set if detected that can use fi_name in copy
+	precision       time.Duration // precision reported
 }
 
 // Object describes a filefabric object
@@ -241,7 +243,7 @@ func (f *Fs) shouldRetry(ctx context.Context, resp *http.Response, err error, st
 		err = status // return the error from the RPC
 		code := status.GetCode()
 		if code == "login_token_expired" {
-			atomic.AddInt32(&f.tokenExpired, 1)
+			f.tokenExpired.Add(1)
 		} else {
 			for _, retryCode := range retryStatusCodes {
 				if code == retryCode.code {
@@ -321,12 +323,12 @@ func (f *Fs) getToken(ctx context.Context) (token string, err error) {
 	var refreshed = false
 	defer func() {
 		if refreshed {
-			atomic.StoreInt32(&f.tokenExpired, 0)
+			f.tokenExpired.Store(0)
 		}
 		f.tokenMu.Unlock()
 	}()
 
-	expired := atomic.LoadInt32(&f.tokenExpired) != 0
+	expired := f.tokenExpired.Load() != 0
 	if expired {
 		fs.Debugf(f, "Token invalid - refreshing")
 	}
@@ -369,11 +371,11 @@ func (f *Fs) getToken(ctx context.Context) (token string, err error) {
 }
 
 // params for rpc
-type params map[string]interface{}
+type params map[string]any
 
 // rpc calls the rpc.php method of the SME file fabric
 //
-// This is an entry point to all the method calls
+// This is an entry point to all the method calls.
 //
 // If result is nil then resp.Body will need closing
 func (f *Fs) rpc(ctx context.Context, function string, p params, result api.OKError, options []fs.OpenOption) (resp *http.Response, err error) {
@@ -490,7 +492,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 				// Root is a dir - cache its ID
 				f.dirCache.Put(f.root, info.ID)
 			}
-		} else {
+			//} else {
 			// Root is not found so a directory
 		}
 	}
@@ -678,7 +680,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // Creates from the parameters passed in a half finished Object which
 // must have setMetaData called on it
 //
-// Returns the object, leaf, directoryID and error
+// Returns the object, leaf, directoryID and error.
 //
 // Used to create new objects
 func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time, size int64) (o *Object, leaf string, directoryID string, err error) {
@@ -697,7 +699,7 @@ func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time,
 
 // Put the object
 //
-// Copy the reader in to the new object which is returned
+// Copy the reader in to the new object which is returned.
 //
 // The new object may have been created if an error is returned
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
@@ -783,9 +785,9 @@ func (f *Fs) Precision() time.Duration {
 
 // Copy src to this remote using server side copy operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -843,7 +845,7 @@ func (f *Fs) Purge(ctx context.Context, dir string) error {
 	return f.purgeCheck(ctx, dir, false)
 }
 
-// Wait for the the background task to complete if necessary
+// Wait for the background task to complete if necessary
 func (f *Fs) waitForBackgroundTask(ctx context.Context, taskID api.String) (err error) {
 	if taskID == "" || taskID == "0" {
 		// No task to wait for
@@ -956,9 +958,9 @@ func (f *Fs) move(ctx context.Context, isDir bool, id, oldLeaf, newLeaf, oldDire
 
 // Move src to this remote using server side move operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -1135,7 +1137,6 @@ func (o *Object) readMetaData(ctx context.Context) (err error) {
 
 // ModTime returns the modification time of the object
 //
-//
 // It attempts to read the objects mtime and if that isn't present the
 // LastModified returned in the http headers
 func (o *Object) ModTime(ctx context.Context) time.Time {
@@ -1187,7 +1188,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		return nil, errors.New("can't download - no id")
 	}
 	if o.contentType == emptyMimeType {
-		return ioutil.NopCloser(bytes.NewReader([]byte{})), nil
+		return io.NopCloser(bytes.NewReader([]byte{})), nil
 	}
 	fs.FixRangeOption(options, o.size)
 	resp, err := o.fs.rpc(ctx, "getFile", params{
@@ -1201,7 +1202,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 
 // Update the object with the contents of the io.Reader, modTime and size
 //
-// If existing is set then it updates the object rather than creating a new one
+// If existing is set then it updates the object rather than creating a new one.
 //
 // The new object may have been created if an error is returned
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {

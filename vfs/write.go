@@ -1,7 +1,6 @@
 package vfs
 
 import (
-	"context"
 	"io"
 	"os"
 	"sync"
@@ -15,17 +14,17 @@ import (
 type WriteFileHandle struct {
 	baseHandle
 	mu          sync.Mutex
-	cond        *sync.Cond // cond lock for out of sequence writes
-	closed      bool       // set if handle has been closed
+	cond        sync.Cond // cond lock for out of sequence writes
 	remote      string
 	pipeWriter  *io.PipeWriter
 	o           fs.Object
 	result      chan error
 	file        *File
-	writeCalled bool // set the first time Write() is called
 	offset      int64
-	opened      bool
 	flags       int
+	closed      bool // set if handle has been closed
+	writeCalled bool // set the first time Write() is called
+	opened      bool
 	truncated   bool
 }
 
@@ -37,13 +36,16 @@ var (
 )
 
 func newWriteFileHandle(d *Dir, f *File, remote string, flags int) (*WriteFileHandle, error) {
+	if f.IsSymlink() {
+		remote += fs.LinkSuffix
+	}
 	fh := &WriteFileHandle{
 		remote: remote,
 		flags:  flags,
 		result: make(chan error, 1),
 		file:   f,
 	}
-	fh.cond = sync.NewCond(&fh.mu)
+	fh.cond = sync.Cond{L: &fh.mu}
 	fh.file.addWriter(fh)
 	return fh, nil
 }
@@ -68,7 +70,7 @@ func (fh *WriteFileHandle) openPending() (err error) {
 	pipeReader, fh.pipeWriter = io.Pipe()
 	go func() {
 		// NB Rcat deals with Stats.Transferring, etc.
-		o, err := operations.Rcat(context.TODO(), fh.file.Fs(), fh.remote, pipeReader, time.Now())
+		o, err := operations.Rcat(fh.file.ctx, fh.file.Fs(), fh.remote, pipeReader, time.Now(), nil)
 		if err != nil {
 			fs.Errorf(fh.remote, "WriteFileHandle.New Rcat failed: %v", err)
 		}
@@ -130,7 +132,7 @@ func (fh *WriteFileHandle) writeAt(p []byte, off int64) (n int, err error) {
 		return 0, ECLOSED
 	}
 	if fh.offset != off {
-		waitSequential("write", fh.remote, fh.cond, fh.file.VFS().Opt.WriteWait, &fh.offset, off)
+		waitSequential("write", fh.remote, &fh.cond, time.Duration(fh.file.VFS().Opt.WriteWait), &fh.offset, off)
 	}
 	if fh.offset != off {
 		fs.Errorf(fh.remote, "WriteFileHandle.Write: can't seek in file without --vfs-cache-mode >= writes")
@@ -203,6 +205,9 @@ func (fh *WriteFileHandle) close() (err error) {
 	if err == nil {
 		fh.file.setObject(fh.o)
 		err = writeCloseErr
+	} else if fh.file.getObject() == nil {
+		// Remove vfs file entry when no object is present
+		_ = fh.file.Remove()
 	}
 	return err
 }
@@ -247,7 +252,7 @@ func (fh *WriteFileHandle) Flush() error {
 	err := fh.close()
 	if err != nil {
 		fs.Errorf(fh.remote, "WriteFileHandle.Flush error: %v", err)
-	} else {
+		//} else {
 		// fs.Debugf(fh.remote, "WriteFileHandle.Flush OK")
 	}
 	return err
@@ -268,7 +273,7 @@ func (fh *WriteFileHandle) Release() error {
 	err := fh.close()
 	if err != nil {
 		fs.Errorf(fh.remote, "WriteFileHandle.Release error: %v", err)
-	} else {
+		//} else {
 		// fs.Debugf(fh.remote, "WriteFileHandle.Release OK")
 	}
 	return err
@@ -316,4 +321,9 @@ func (fh *WriteFileHandle) ReadAt(p []byte, off int64) (n int, err error) {
 // data to disk.
 func (fh *WriteFileHandle) Sync() error {
 	return nil
+}
+
+// Name returns the name of the file from the underlying Object.
+func (fh *WriteFileHandle) Name() string {
+	return fh.file.String()
 }

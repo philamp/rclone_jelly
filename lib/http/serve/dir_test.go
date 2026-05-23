@@ -1,23 +1,23 @@
 package serve
 
 import (
+	"context"
 	"errors"
 	"html/template"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
 	"time"
 
+	libhttp "github.com/rclone/rclone/lib/http"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/rclone/rclone/cmd/serve/http/data"
 )
 
 func GetTemplate(t *testing.T) *template.Template {
-	htmlTemplate, err := data.GetTemplate("../../../cmd/serve/http/testdata/golden/testindex.html")
+	htmlTemplate, err := libhttp.GetTemplate("../../../cmd/serve/http/testdata/golden/testindex.html")
 	require.NoError(t, err)
 	return htmlTemplate
 }
@@ -46,11 +46,11 @@ func TestAddHTMLEntry(t *testing.T) {
 	d.AddHTMLEntry("a/b/c/colon:colon.txt", false, 64, modtime)
 	d.AddHTMLEntry("\"quotes\".txt", false, 64, modtime)
 	assert.Equal(t, []DirEntry{
-		{remote: "", URL: "/", Leaf: "/", IsDir: true, Size: 0, ModTime: modtime},
-		{remote: "dir", URL: "dir/", Leaf: "dir/", IsDir: true, Size: 0, ModTime: modtime},
-		{remote: "a/b/c/d.txt", URL: "d.txt", Leaf: "d.txt", IsDir: false, Size: 64, ModTime: modtime},
-		{remote: "a/b/c/colon:colon.txt", URL: "./colon:colon.txt", Leaf: "colon:colon.txt", IsDir: false, Size: 64, ModTime: modtime},
-		{remote: "\"quotes\".txt", URL: "%22quotes%22.txt", Leaf: "\"quotes\".txt", Size: 64, IsDir: false, ModTime: modtime},
+		{remote: "", URL: "/", ZipURL: "/?download=zip", Leaf: "/", IsDir: true, Size: 0, ModTime: modtime},
+		{remote: "dir", URL: "dir/", ZipURL: "dir/?download=zip", Leaf: "dir/", IsDir: true, Size: 0, ModTime: modtime},
+		{remote: "a/b/c/d.txt", URL: "d.txt", ZipURL: "", Leaf: "d.txt", IsDir: false, Size: 64, ModTime: modtime},
+		{remote: "a/b/c/colon:colon.txt", URL: "./colon:colon.txt", ZipURL: "", Leaf: "colon:colon.txt", IsDir: false, Size: 64, ModTime: modtime},
+		{remote: "\"quotes\".txt", URL: "%22quotes%22.txt", ZipURL: "", Leaf: "\"quotes\".txt", Size: 64, IsDir: false, ModTime: modtime},
 	}, d.Entries)
 
 	// Now test with a query parameter
@@ -58,8 +58,8 @@ func TestAddHTMLEntry(t *testing.T) {
 	d.AddHTMLEntry("file", false, 64, modtime)
 	d.AddHTMLEntry("dir", true, 0, modtime)
 	assert.Equal(t, []DirEntry{
-		{remote: "file", URL: "file?potato=42", Leaf: "file", IsDir: false, Size: 64, ModTime: modtime},
-		{remote: "dir", URL: "dir/?potato=42", Leaf: "dir/", IsDir: true, Size: 0, ModTime: modtime},
+		{remote: "file", URL: "file?potato=42", ZipURL: "", Leaf: "file", IsDir: false, Size: 64, ModTime: modtime},
+		{remote: "dir", URL: "dir/?potato=42", ZipURL: "dir/?download=zip", Leaf: "dir/", IsDir: true, Size: 0, ModTime: modtime},
 	}, d.Entries)
 }
 
@@ -89,12 +89,13 @@ func TestAddEntry(t *testing.T) {
 }
 
 func TestError(t *testing.T) {
+	ctx := context.Background()
 	w := httptest.NewRecorder()
 	err := errors.New("help")
-	Error("potato", w, "sausage", err)
+	Error(ctx, "potato", w, "sausage", err)
 	resp := w.Result()
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
-	body, _ := ioutil.ReadAll(resp.Body)
+	body, _ := io.ReadAll(resp.Body)
 	assert.Equal(t, "sausage.\n", string(body))
 }
 
@@ -108,7 +109,7 @@ func TestServe(t *testing.T) {
 	d.Serve(w, r)
 	resp := w.Result()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	body, _ := ioutil.ReadAll(resp.Body)
+	body, _ := io.ReadAll(resp.Body)
 	assert.Equal(t, `<!DOCTYPE html>
 <html lang="en">
 <head>

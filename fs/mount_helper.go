@@ -3,7 +3,6 @@ package fs
 import (
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,7 +15,7 @@ func init() {
 		if args, err := convertMountHelperArgs(os.Args); err == nil {
 			os.Args = args
 		} else {
-			log.Fatalf("Failed to parse command line: %v", err)
+			Fatalf(nil, "Failed to parse command line: %v", err)
 		}
 	}
 }
@@ -100,10 +99,7 @@ func convertMountHelperArgs(origArgs []string) ([]string, error) {
 				continue
 			}
 
-			param, value := opt, ""
-			if idx := strings.Index(opt, "="); idx != -1 {
-				param, value = opt[:idx], opt[idx+1:]
-			}
+			param, value, _ := strings.Cut(opt, "=")
 
 			// Set environment variables
 			if strings.HasPrefix(param, "env.") {
@@ -169,7 +165,9 @@ func convertMountHelperArgs(origArgs []string) ([]string, error) {
 // parseHelperOptionString deconstructs the -o value into slice of options
 // in a way similar to connection strings.
 // Example:
-//   param1=value,param2="qvalue",param3='item1,item2',param4="a ""b"" 'c'"
+//
+//	param1=value,param2="qvalue",param3='item1,item2',param4="a ""b"" 'c'"
+//
 // An error may be returned if the remote name has invalid characters
 // or the parameters are invalid or the path is empty.
 //

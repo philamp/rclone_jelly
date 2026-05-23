@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -44,7 +45,7 @@ func (r retryError) Retry() bool {
 var _ Retrier = retryError("")
 
 // RetryErrorf makes an error which indicates it would like to be retried
-func RetryErrorf(format string, a ...interface{}) error {
+func RetryErrorf(format string, a ...any) error {
 	return retryError(fmt.Sprintf(format, a...))
 }
 
@@ -258,7 +259,7 @@ func NewErrorRetryAfter(d time.Duration) ErrorRetryAfter {
 
 // Error returns the textual version of the error
 func (e ErrorRetryAfter) Error() string {
-	return fmt.Sprintf("try again after %v (%v)", time.Time(e).Format(time.RFC3339Nano), time.Time(e).Sub(time.Now()))
+	return fmt.Sprintf("try again after %v (%v)", time.Time(e).Format(time.RFC3339Nano), time.Until(time.Time(e)))
 }
 
 // RetryAfter returns the time the operation should be retried at or
@@ -296,7 +297,7 @@ type CountableError interface {
 	IsCounted() bool
 }
 
-// wrappedFatalError is an error wrapped so it will satisfy the
+// wrappedCountableError is an error wrapped so it will satisfy the
 // Retrier interface and return true
 type wrappedCountableError struct {
 	error
@@ -417,10 +418,8 @@ func ShouldRetry(err error) bool {
 	}
 
 	// Check if it is a retriable error
-	for _, retriableErr := range retriableErrors {
-		if err == retriableErr {
-			return true
-		}
+	if slices.Contains(retriableErrors, err) {
+		return true
 	}
 
 	// Check error strings (yuch!) too
@@ -441,12 +440,7 @@ func ShouldRetryHTTP(resp *http.Response, retryErrorCodes []int) bool {
 	if resp == nil {
 		return false
 	}
-	for _, e := range retryErrorCodes {
-		if resp.StatusCode == e {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(retryErrorCodes, resp.StatusCode)
 }
 
 // ContextError checks to see if ctx is in error.

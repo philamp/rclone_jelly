@@ -82,13 +82,7 @@ func (x SizeSuffix) unit(unit string) string {
 	if val == "off" {
 		return val
 	}
-	var suffixUnit string
-	if suffix != "" && unit != "" {
-		suffixUnit = suffix + unit
-	} else {
-		suffixUnit = suffix + unit
-	}
-	return val + " " + suffixUnit
+	return val + " " + suffix + unit
 }
 
 // BitUnit turns SizeSuffix into a string with bit unit
@@ -192,7 +186,7 @@ func (x *SizeSuffix) Set(s string) error {
 }
 
 // Type of the value
-func (x *SizeSuffix) Type() string {
+func (x SizeSuffix) Type() string {
 	return "SizeSuffix"
 }
 

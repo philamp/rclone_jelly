@@ -12,10 +12,10 @@ import (
 //
 // It expects 1, 2 or 3 arguments
 //
-//   rclone authorize "fs name"
-//   rclone authorize "fs name" "base64 encoded JSON blob"
-//   rclone authorize "fs name" "client id" "client secret"
-func Authorize(ctx context.Context, args []string, noAutoBrowser bool) error {
+//	rclone authorize "backend name"
+//	rclone authorize "backend name" "base64 encoded JSON blob"
+//	rclone authorize "backend name" "client id" "client secret"
+func Authorize(ctx context.Context, args []string, noAutoBrowser bool, templateFile string) error {
 	ctx = suppressConfirm(ctx)
 	ctx = fs.ConfigOAuthOnly(ctx)
 	switch len(args) {
@@ -41,6 +41,11 @@ func Authorize(ctx context.Context, args []string, noAutoBrowser bool) error {
 		inM[ConfigAuthNoBrowser] = "true"
 	}
 
+	// Indicate if we specified a custom template via a file
+	if templateFile != "" {
+		inM[ConfigTemplateFile] = templateFile
+	}
+
 	// Add extra parameters if supplied
 	if len(args) == 2 {
 		err := inM.Decode(args[1])
@@ -55,7 +60,7 @@ func Authorize(ctx context.Context, args []string, noAutoBrowser bool) error {
 	// Name used for temporary remote
 	name := "**temp-fs**"
 
-	m := fs.ConfigMap(ri, name, inM)
+	m := fs.ConfigMap(ri.Prefix, ri.Options, name, inM)
 	outM := configmap.Simple{}
 	m.ClearSetters()
 	m.AddSetter(outM)

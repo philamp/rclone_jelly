@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -75,11 +76,11 @@ type ConfigIn struct {
 // Error is displayed to the user before asking a question
 // Result is passed to the next call to Config if Option/OAuth isn't set
 type ConfigOut struct {
-	State  string      // State to jump to after this
-	Option *Option     // Option to query user about
-	OAuth  interface{} `json:"-"` // Do OAuth if set
-	Error  string      // error to be displayed to the user
-	Result string      // if Option/OAuth not set then this is passed to the next state
+	State  string  // State to jump to after this
+	Option *Option // Option to query user about
+	OAuth  any     `json:"-"` // Do OAuth if set
+	Error  string  // error to be displayed to the user
+	Result string  // if Option/OAuth not set then this is passed to the next state
 }
 
 // ConfigInputOptional asks the user for a string which may be empty
@@ -176,7 +177,13 @@ func ConfigConfirm(state string, Default bool, name string, help string) (*Confi
 	}, nil
 }
 
-// ConfigChooseFixed returns a ConfigOut structure which has a list of items to choose from.
+// ConfigChooseExclusiveFixed returns a ConfigOut structure which has a list of
+// items to choose from.
+//
+// Possible items must be supplied as a fixed list.
+//
+// User is required to supply a value, and is restricted to the specified list,
+// i.e. free text input is not allowed.
 //
 // state should be the next state required
 // name is the config name for this item
@@ -185,8 +192,8 @@ func ConfigConfirm(state string, Default bool, name string, help string) (*Confi
 //
 // It chooses the first item to be the default.
 // If there are no items then it will return an error.
-// If there is only one item it will short cut to the next state
-func ConfigChooseFixed(state string, name string, help string, items []OptionExample) (*ConfigOut, error) {
+// If there is only one item it will short cut to the next state.
+func ConfigChooseExclusiveFixed(state string, name string, help string, items []OptionExample) (*ConfigOut, error) {
 	if len(items) == 0 {
 		return nil, fmt.Errorf("no items found in: %s", help)
 	}
@@ -208,7 +215,13 @@ func ConfigChooseFixed(state string, name string, help string, items []OptionExa
 	return choose, nil
 }
 
-// ConfigChoose returns a ConfigOut structure which has a list of items to choose from.
+// ConfigChooseExclusive returns a ConfigOut structure which has a list of
+// items to choose from.
+//
+// Possible items are retrieved from a supplied function.
+//
+// User is required to supply a value, and is restricted to the specified list,
+// i.e. free text input is not allowed.
 //
 // state should be the next state required
 // name is the config name for this item
@@ -218,7 +231,60 @@ func ConfigChooseFixed(state string, name string, help string, items []OptionExa
 //
 // It chooses the first item to be the default.
 // If there are no items then it will return an error.
-// If there is only one item it will short cut to the next state
+// If there is only one item it will short cut to the next state.
+func ConfigChooseExclusive(state string, name string, help string, n int, getItem func(i int) (itemValue string, itemHelp string)) (*ConfigOut, error) {
+	items := make(OptionExamples, n)
+	for i := range items {
+		items[i].Value, items[i].Help = getItem(i)
+	}
+	return ConfigChooseExclusiveFixed(state, name, help, items)
+}
+
+// ConfigChooseFixed returns a ConfigOut structure which has a list of
+// suggested items.
+//
+// Suggested items must be supplied as a fixed list.
+//
+// User is required to supply a value, but is not restricted to the specified
+// list, i.e. free text input is accepted.
+//
+// state should be the next state required
+// name is the config name for this item
+// help should be the help shown to the user
+// items should be the items in the list
+//
+// It chooses the first item to be the default.
+func ConfigChooseFixed(state string, name string, help string, items []OptionExample) (*ConfigOut, error) {
+	choose := &ConfigOut{
+		State: state,
+		Option: &Option{
+			Name:     name,
+			Help:     help,
+			Examples: items,
+			Required: true,
+		},
+	}
+	if len(choose.Option.Examples) > 0 {
+		choose.Option.Default = choose.Option.Examples[0].Value
+	}
+	return choose, nil
+}
+
+// ConfigChoose returns a ConfigOut structure which has a list of suggested
+// items.
+//
+// Suggested items are retrieved from a supplied function.
+//
+// User is required to supply a value, but is not restricted to the specified
+// list, i.e. free text input is accepted.
+//
+// state should be the next state required
+// name is the config name for this item
+// help should be the help shown to the user
+// n should be the number of items in the list
+// getItem should return the items (value, help)
+//
+// It chooses the first item to be the default.
 func ConfigChoose(state string, name string, help string, n int, getItem func(i int) (itemValue string, itemHelp string)) (*ConfigOut, error) {
 	items := make(OptionExamples, n)
 	for i := range items {
@@ -311,7 +377,7 @@ func configAll(ctx context.Context, name string, m configmap.Mapper, ri *RegInfo
 	//
 	//     *all-ACTION,NUMBER,ADVANCED
 	//
-	// Where NUMBER is the curent state, ADVANCED is a flag true or false
+	// Where NUMBER is the current state, ADVANCED is a flag true or false
 	// to say whether we are asking about advanced config and
 	// ACTION is what the state should be doing next.
 	stateParams, state := StatePop(in.State)
@@ -490,13 +556,7 @@ func MatchProvider(providerConfig, provider string) bool {
 		negate = true
 	}
 	providers := strings.Split(providerConfig, ",")
-	matched := false
-	for _, p := range providers {
-		if p == provider {
-			matched = true
-			break
-		}
-	}
+	matched := slices.Contains(providers, provider)
 	if negate {
 		return !matched
 	}

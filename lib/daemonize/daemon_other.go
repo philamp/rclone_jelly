@@ -1,8 +1,6 @@
-// Daemonization stub for non-Unix platforms (implementation)
+//go:build !unix || aix
 
-//go:build windows || plan9 || js
-// +build windows plan9 js
-
+// Package daemonize provides daemonization stub for non-Unix platforms.
 package daemonize
 
 import (
@@ -11,7 +9,14 @@ import (
 	"runtime"
 )
 
+var errNotSupported = fmt.Errorf("daemon mode is not supported on the %s platform", runtime.GOOS)
+
 // StartDaemon runs background twin of current process.
 func StartDaemon(args []string) (*os.Process, error) {
-	return nil, fmt.Errorf("background mode is not supported on %s platform", runtime.GOOS)
+	return nil, errNotSupported
+}
+
+// Check returns non nil if the daemon process has died
+func Check(daemon *os.Process) error {
+	return errNotSupported
 }

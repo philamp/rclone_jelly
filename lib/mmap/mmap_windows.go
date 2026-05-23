@@ -2,13 +2,11 @@
 // anonymous memory maps.
 
 //go:build windows
-// +build windows
 
 package mmap
 
 import (
 	"fmt"
-	"reflect"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -22,20 +20,18 @@ func Alloc(size int) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mmap: failed to allocate memory for buffer: %w", err)
 	}
-	var mem []byte
-	sh := (*reflect.SliceHeader)(unsafe.Pointer(&mem))
-	sh.Data = p
-	sh.Len = size
-	sh.Cap = size
-	return mem, nil
+
+	pp := unsafe.Pointer(&p)
+	up := *(*unsafe.Pointer)(pp)
+	return unsafe.Slice((*byte)(up), size), nil
 }
 
 // Free frees buffers allocated by Alloc.  Note it should be passed
 // the same slice (not a derived slice) that Alloc returned.  If the
 // free fails it will return with an error.
 func Free(mem []byte) error {
-	sh := (*reflect.SliceHeader)(unsafe.Pointer(&mem))
-	err := windows.VirtualFree(sh.Data, 0, windows.MEM_RELEASE)
+	p := unsafe.SliceData(mem)
+	err := windows.VirtualFree(uintptr(unsafe.Pointer(p)), 0, windows.MEM_RELEASE)
 	if err != nil {
 		return fmt.Errorf("mmap: failed to unmap memory: %w", err)
 	}

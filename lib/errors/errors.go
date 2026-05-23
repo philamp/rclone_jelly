@@ -1,3 +1,4 @@
+// Package errors provides error handling utilities.
 package errors
 
 import (
@@ -14,10 +15,13 @@ type WalkFunc func(error) bool
 // is stopped and no further calls will be made.
 //
 // The next error in the chain is determined by the following rules:
-//   the return value of this method is used.
-// - If the current error has a `Unwrap() error` method (golang.org/x/xerrors),
-//   the return value of this method is used.
-// - Common errors in the Go runtime that contain an Err field will use this value.
+//
+//		the return value of this method is used.
+//	  - If the current error has a `Unwrap() error` method
+//	    the return value of this method is used.
+//	  - If the current error has a `Unwrap() []error` method
+//	    the return values of this method is used.
+//	  - Common errors in the Go runtime that contain an Err field will use this value.
 func Walk(err error, f WalkFunc) {
 	for prev := err; err != nil; prev = err {
 		if f(err) {
@@ -25,6 +29,11 @@ func Walk(err error, f WalkFunc) {
 		}
 
 		switch e := err.(type) {
+		case multiWrapper:
+			for _, err = range e.Unwrap() {
+				Walk(err, f)
+			}
+			return
 		case causer:
 			err = e.Cause()
 		case wrapper:
@@ -35,7 +44,7 @@ func Walk(err error, f WalkFunc) {
 			// *os.SyscallError and many others in the stdlib.
 			errType := reflect.TypeOf(err)
 			errValue := reflect.ValueOf(err)
-			if errValue.IsValid() && errType.Kind() == reflect.Ptr {
+			if errValue.IsValid() && errType.Kind() == reflect.Pointer {
 				errType = errType.Elem()
 				errValue = errValue.Elem()
 			}
@@ -48,7 +57,7 @@ func Walk(err error, f WalkFunc) {
 				}
 			}
 		}
-		if reflect.DeepEqual(err, prev) {
+		if reflect.DeepEqual(err, prev) { //nolint:govet // deepequalerrors
 			break
 		}
 	}
@@ -59,4 +68,7 @@ type causer interface {
 }
 type wrapper interface {
 	Unwrap() error
+}
+type multiWrapper interface {
+	Unwrap() []error
 }

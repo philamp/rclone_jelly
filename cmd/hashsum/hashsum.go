@@ -1,3 +1,4 @@
+// Package hashsum provides the hashsum command.
 package hashsum
 
 import (
@@ -30,10 +31,10 @@ func init() {
 
 // AddHashsumFlags is a convenience function to add the command flags OutputBase64 and DownloadFlag to hashsum, md5sum, sha1sum
 func AddHashsumFlags(cmdFlags *pflag.FlagSet) {
-	flags.BoolVarP(cmdFlags, &OutputBase64, "base64", "", OutputBase64, "Output base64 encoded hashsum")
-	flags.StringVarP(cmdFlags, &HashsumOutfile, "output-file", "", HashsumOutfile, "Output hashsums to a file rather than the terminal")
-	flags.StringVarP(cmdFlags, &ChecksumFile, "checkfile", "C", ChecksumFile, "Validate hashes against a given SUM file instead of printing them")
-	flags.BoolVarP(cmdFlags, &DownloadFlag, "download", "", DownloadFlag, "Download the file and hash it locally; if this flag is not specified, the hash is requested from the remote")
+	flags.BoolVarP(cmdFlags, &OutputBase64, "base64", "", OutputBase64, "Output base64 encoded hashsum", "")
+	flags.StringVarP(cmdFlags, &HashsumOutfile, "output-file", "", HashsumOutfile, "Output hashsums to a file rather than the terminal", "")
+	flags.StringVarP(cmdFlags, &ChecksumFile, "checkfile", "C", ChecksumFile, "Validate hashes against a given SUM file instead of printing them", "")
+	flags.BoolVarP(cmdFlags, &DownloadFlag, "download", "", DownloadFlag, "Download the file and hash it locally; if this flag is not specified, the hash is requested from the remote", "")
 }
 
 // GetHashsumOutput opens and closes the output file when using the output-file flag
@@ -81,10 +82,9 @@ func CreateFromStdinArg(ht hash.Type, args []string, startArg int) (bool, error)
 }
 
 var commandDefinition = &cobra.Command{
-	Use:   "hashsum <hash> remote:path",
+	Use:   "hashsum [<hash> remote:path]",
 	Short: `Produces a hashsum file for all the objects in the path.`,
-	Long: `
-Produces a hash file for all the objects in the path using the hash
+	Long: `Produces a hash file for all the objects in the path using the hash
 named.  The output is in the same format as the standard
 md5sum/sha1sum tool.
 
@@ -93,21 +93,31 @@ not supported by the remote, no hash will be returned.  With the
 download flag, the file will be downloaded from the remote and
 hashed locally enabling any hash for any remote.
 
+For the MD5 and SHA1 algorithms there are also dedicated commands,
+[md5sum](/commands/rclone_md5sum/) and [sha1sum](/commands/rclone_sha1sum/).
+
 This command can also hash data received on standard input (stdin),
 by not passing a remote:path, or by passing a hyphen as remote:path
-when there is data to read (if not, the hypen will be treated literaly,
+when there is data to read (if not, the hyphen will be treated literally,
 as a relative path).
 
 Run without a hash to see the list of all supported hashes, e.g.
 
-    $ rclone hashsum
-` + hash.HelpString(4) + `
+` + "```console" + `
+$ rclone hashsum
+` + hash.HelpString(0) + "```" + `
+
 Then
 
-    $ rclone hashsum MD5 remote:path
+` + "```console" + `
+rclone hashsum MD5 remote:path
+` + "```" + `
 
-Note that hash names are case insensitive and values are output in lower case.
-`,
+Note that hash names are case insensitive and values are output in lower case.`,
+	Annotations: map[string]string{
+		"versionIntroduced": "v1.41",
+		"groups":            "Filter,Listing",
+	},
 	RunE: func(command *cobra.Command, args []string) error {
 		cmd.CheckArgs(0, 2, command, args)
 		if len(args) == 0 {

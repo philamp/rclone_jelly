@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Compare a and b in a file system idependent way
+// Compare a and b in a file system independent way
 func compareListJSONItem(t *testing.T, a, b *operations.ListJSONItem, precision time.Duration) {
 	assert.Equal(t, a.Path, b.Path, "Path")
 	assert.Equal(t, a.Name, b.Name, "Name")
@@ -37,7 +37,6 @@ func compareListJSONItem(t *testing.T, a, b *operations.ListJSONItem, precision 
 func TestListJSON(t *testing.T) {
 	ctx := context.Background()
 	r := fstest.NewRun(t)
-	defer r.Finalise()
 	file1 := r.WriteBoth(ctx, "file1", "file1", t1)
 	file2 := r.WriteBoth(ctx, "sub/file2", "sub/file2", t2)
 
@@ -172,6 +171,23 @@ func TestListJSON(t *testing.T) {
 				ModTime: operations.Timestamp{When: t1},
 				IsDir:   false,
 			}},
+		}, {
+			name: "Metadata",
+			opt: operations.ListJSONOpt{
+				FilesOnly: false,
+				Metadata:  true,
+			},
+			want: []*operations.ListJSONItem{{
+				Path:    "file1",
+				Name:    "file1",
+				Size:    5,
+				ModTime: operations.Timestamp{When: t1},
+				IsDir:   false,
+			}, {
+				Path:  "sub",
+				Name:  "sub",
+				IsDir: true,
+			}},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -190,6 +206,15 @@ func TestListJSON(t *testing.T) {
 					assert.Equal(t, "", got[i].MimeType)
 				} else {
 					assert.NotEqual(t, "", got[i].MimeType)
+				}
+				if test.opt.Metadata {
+					features := r.Fremote.Features()
+					if features.ReadMetadata && !got[i].IsDir {
+						assert.Greater(t, len(got[i].Metadata), 0, "Expecting metadata for file")
+					}
+					if features.ReadDirMetadata && got[i].IsDir {
+						assert.Greater(t, len(got[i].Metadata), 0, "Expecting metadata for dir")
+					}
 				}
 				if test.opt.ShowHash {
 					hashes := got[i].Hashes
@@ -232,7 +257,6 @@ func TestListJSON(t *testing.T) {
 func TestStatJSON(t *testing.T) {
 	ctx := context.Background()
 	r := fstest.NewRun(t)
-	defer r.Finalise()
 	file1 := r.WriteBoth(ctx, "file1", "file1", t1)
 	file2 := r.WriteBoth(ctx, "sub/file2", "sub/file2", t2)
 
@@ -275,6 +299,15 @@ func TestStatJSON(t *testing.T) {
 		}, {
 			name:   "Dir",
 			remote: "sub",
+			opt:    operations.ListJSONOpt{},
+			want: &operations.ListJSONItem{
+				Path:  "sub",
+				Name:  "sub",
+				IsDir: true,
+			},
+		}, {
+			name:   "DirWithTrailingSlash",
+			remote: "sub/",
 			opt:    operations.ListJSONOpt{},
 			want: &operations.ListJSONItem{
 				Path:  "sub",

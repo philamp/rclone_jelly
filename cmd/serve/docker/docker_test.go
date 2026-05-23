@@ -1,5 +1,4 @@
 //go:build !race
-// +build !race
 
 package docker_test
 
@@ -8,7 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -50,7 +49,7 @@ func initialise(ctx context.Context, t *testing.T) (string, fs.Fs) {
 	return testDir, testFs
 }
 
-func assertErrorContains(t *testing.T, err error, errString string, msgAndArgs ...interface{}) {
+func assertErrorContains(t *testing.T, err error, errString string, msgAndArgs ...any) {
 	assert.Error(t, err)
 	if err != nil {
 		assert.Contains(t, err.Error(), errString, msgAndArgs...)
@@ -245,7 +244,7 @@ func newAPIClient(t *testing.T, host, unixPath string) *APIClient {
 	}
 }
 
-func (a *APIClient) request(path string, in, out interface{}, wantErr bool) {
+func (a *APIClient) request(path string, in, out any, wantErr bool) {
 	t := a.t
 	var (
 		dataIn  []byte
@@ -280,7 +279,7 @@ func (a *APIClient) request(path string, in, out interface{}, wantErr bool) {
 	}
 	assert.Equal(t, wantStatus, res.StatusCode)
 
-	dataOut, err = ioutil.ReadAll(res.Body)
+	dataOut, err = io.ReadAll(res.Body)
 	require.NoError(t, err)
 	err = res.Body.Close()
 	require.NoError(t, err)
@@ -389,11 +388,11 @@ func testMountAPI(t *testing.T, sockAddr string) {
 	assert.Contains(t, res, "volume is in use")
 
 	text := []byte("banana")
-	err = ioutil.WriteFile(filepath.Join(mount1, "txt"), text, 0644)
+	err = os.WriteFile(filepath.Join(mount1, "txt"), text, 0644)
 	assert.NoError(t, err)
 	time.Sleep(tempDelay)
 
-	text2, err := ioutil.ReadFile(filepath.Join(path1, "txt"))
+	text2, err := os.ReadFile(filepath.Join(path1, "txt"))
 	assert.NoError(t, err)
 	if runtime.GOOS != "windows" {
 		// this check sometimes fails on windows - ignore

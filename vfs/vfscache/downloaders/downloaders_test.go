@@ -3,7 +3,6 @@ package downloaders
 import (
 	"context"
 	"io"
-	"io/ioutil"
 	"sync"
 	"testing"
 	"time"
@@ -53,7 +52,7 @@ func (item *testItem) FindMissing(r ranges.Range) (outr ranges.Range) {
 // WriteAtNoOverwrite writes b to the file, but will not overwrite
 // already present ranges.
 //
-// This is used by the downloader to write bytes to the file
+// This is used by the downloader to write bytes to the file.
 //
 // It returns n the total bytes processed and skipped the number of
 // bytes which were processed but not actually written to the file.
@@ -76,7 +75,6 @@ func (item *testItem) WriteAtNoOverwrite(b []byte, off int64) (n int, skipped in
 
 func TestDownloaders(t *testing.T) {
 	r := fstest.NewRun(t)
-	defer r.Finalise()
 
 	var (
 		ctx    = context.Background()
@@ -85,8 +83,8 @@ func TestDownloaders(t *testing.T) {
 	)
 
 	// Write the test file
-	in := ioutil.NopCloser(readers.NewPatternReader(size))
-	src, err := operations.RcatSize(ctx, r.Fremote, remote, in, size, time.Now())
+	in := io.NopCloser(readers.NewPatternReader(size))
+	src, err := operations.RcatSize(ctx, r.Fremote, remote, in, size, time.Now(), nil)
 	require.NoError(t, err)
 	assert.Equal(t, size, src.Size())
 
@@ -95,8 +93,8 @@ func TestDownloaders(t *testing.T) {
 			t:    t,
 			size: size,
 		}
-		opt := vfscommon.DefaultOpt
-		dls := New(item, &opt, remote, src)
+		opt := vfscommon.Opt
+		dls := New(ctx, item, &opt, remote, src)
 		return item, dls
 	}
 	cancel := func(dls *Downloaders) {
@@ -124,9 +122,8 @@ func TestDownloaders(t *testing.T) {
 		r := ranges.Range{Pos: 40 * 1024 * 1024, Size: 250}
 		err := dls.EnsureDownloader(r)
 		require.NoError(t, err)
-		// FIXME racy test
-		assert.False(t, item.HasRange(r))
-		time.Sleep(time.Second)
-		assert.True(t, item.HasRange(r))
+		assert.Eventually(t, func() bool {
+			return item.HasRange(r)
+		}, 10*time.Second, 10*time.Millisecond)
 	})
 }

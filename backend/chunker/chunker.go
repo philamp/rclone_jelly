@@ -12,7 +12,6 @@ import (
 	"fmt"
 	gohash "hash"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"path"
 	"regexp"
@@ -30,9 +29,9 @@ import (
 	"github.com/rclone/rclone/fs/fspath"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/operations"
+	"github.com/rclone/rclone/lib/encoder"
 )
 
-//
 // Chunker's composite files have one or more chunks
 // and optional metadata object. If it's present,
 // meta object is named after the original file.
@@ -65,7 +64,7 @@ import (
 // length of 13 decimals it makes a 7-digit base-36 number.
 //
 // When transactions is set to the norename style, data chunks will
-// keep their temporary chunk names (with the transacion identifier
+// keep their temporary chunk names (with the transaction identifier
 // suffix). To distinguish them from temporary chunks, the txn field
 // of the metadata file is set to match the transaction identifier of
 // the data chunks.
@@ -79,7 +78,6 @@ import (
 // Metadata format v1 does not define any control chunk types,
 // they are currently ignored aka reserved.
 // In future they can be used to implement resumable uploads etc.
-//
 const (
 	ctrlTypeRegStr   = `[a-z][a-z0-9]{2,6}`
 	tempSuffixFormat = `_%04s`
@@ -104,8 +102,10 @@ var (
 //
 // And still chunker's primary function is to chunk large files
 // rather than serve as a generic metadata container.
-const maxMetadataSize = 1023
-const maxMetadataSizeWritten = 255
+const (
+	maxMetadataSize        = 1023
+	maxMetadataSizeWritten = 255
+)
 
 // Current/highest supported metadata format.
 const metadataVersion = 2
@@ -308,7 +308,6 @@ func NewFs(ctx context.Context, name, rpath string, m configmap.Mapper) (fs.Fs, 
 		root: rpath,
 		opt:  *opt,
 	}
-	cache.PinUntilFinalized(f.base, f)
 	f.dirSort = true // processEntries requires that meta Objects prerun data chunks atm.
 
 	if err := f.configure(opt.NameFormat, opt.MetaFormat, opt.HashType, opt.Transactions); err != nil {
@@ -320,11 +319,21 @@ func NewFs(ctx context.Context, name, rpath string, m configmap.Mapper) (fs.Fs, 
 	// i.e. `rpath` does not exist in the wrapped remote, but chunker
 	// detects a composite file because it finds the first chunk!
 	// (yet can't satisfy fstest.CheckListing, will ignore)
-	if err == nil && !f.useMeta && strings.Contains(rpath, "/") {
+	if err == nil && !f.useMeta {
 		firstChunkPath := f.makeChunkName(remotePath, 0, "", "")
-		_, testErr := cache.Get(ctx, baseName+firstChunkPath)
+		newBase, testErr := cache.Get(ctx, baseName+firstChunkPath)
 		if testErr == fs.ErrorIsFile {
+			f.base = newBase
 			err = testErr
+		}
+	}
+	cache.PinUntilFinalized(f.base, f)
+
+	// Correct root if definitely pointing to a file
+	if err == fs.ErrorIsFile {
+		f.root = path.Dir(f.root)
+		if f.root == "." || f.root == "/" {
+			f.root = ""
 		}
 	}
 
@@ -333,16 +342,22 @@ func NewFs(ctx context.Context, name, rpath string, m configmap.Mapper) (fs.Fs, 
 	// Note 2: features.Fill() points features.PutStream to our PutStream,
 	// but features.Mask() will nullify it if wrappedFs does not have it.
 	f.features = (&fs.Features{
-		CaseInsensitive:         true,
-		DuplicateFiles:          true,
-		ReadMimeType:            false, // Object.MimeType not supported
-		WriteMimeType:           true,
-		BucketBased:             true,
-		CanHaveEmptyDirectories: true,
-		ServerSideAcrossConfigs: true,
+		CaseInsensitive:          true,
+		DuplicateFiles:           true,
+		ReadMimeType:             false, // Object.MimeType not supported
+		WriteMimeType:            true,
+		BucketBased:              true,
+		CanHaveEmptyDirectories:  true,
+		ServerSideAcrossConfigs:  true,
+		ReadDirMetadata:          true,
+		WriteDirMetadata:         true,
+		WriteDirSetModTime:       true,
+		UserDirMetadata:          true,
+		DirModTimeUpdatesOnWrite: true,
 	}).Fill(ctx, f).Mask(ctx, baseFs).WrapsFs(f, baseFs)
 
-	f.features.Disable("ListR") // Recursive listing may cause chunker skip files
+	f.features.ListR = nil // Recursive listing may cause chunker skip files
+	f.features.ListP = nil // ListP not supported yet
 
 	return f, err
 }
@@ -542,7 +557,6 @@ func (f *Fs) setChunkNameFormat(pattern string) error {
 //
 // xactID is a transaction identifier. Empty xactID denotes active chunk,
 // otherwise temporary chunk name is produced.
-//
 func (f *Fs) makeChunkName(filePath string, chunkNo int, ctrlType, xactID string) string {
 	dir, parentName := path.Split(filePath)
 	var name, tempSuffix string
@@ -619,7 +633,7 @@ func (f *Fs) parseChunkName(filePath string) (parentPath string, chunkNo int, ct
 
 // forbidChunk prints error message or raises error if file is chunk.
 // First argument sets log prefix, use `false` to suppress message.
-func (f *Fs) forbidChunk(o interface{}, filePath string) error {
+func (f *Fs) forbidChunk(o any, filePath string) error {
 	if parentPath, _, _, _ := f.parseChunkName(filePath); parentPath != "" {
 		if f.opt.FailHard {
 			return fmt.Errorf("chunk overlap with %q", parentPath)
@@ -667,7 +681,7 @@ func (f *Fs) newXactID(ctx context.Context, filePath string) (xactID string, err
 	circleSec := unixSec % closestPrimeZzzzSeconds
 	first4chars := strconv.FormatInt(circleSec, 36)
 
-	for tries := 0; tries < maxTransactionProbes; tries++ {
+	for range maxTransactionProbes {
 		f.xactIDMutex.Lock()
 		randomness := f.xactIDRand.Int63n(maxTwoBase36Digits + 1)
 		f.xactIDMutex.Unlock()
@@ -708,7 +722,6 @@ func (f *Fs) newXactID(ctx context.Context, filePath string) (xactID string, err
 // directory together with dead chunks.
 // In future a flag named like `--chunker-list-hidden` may be added to
 // rclone that will tell List to reveal hidden chunks.
-//
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
 	entries, err = f.base.List(ctx, dir)
 	if err != nil {
@@ -818,8 +831,7 @@ func (f *Fs) processEntries(ctx context.Context, origEntries fs.DirEntries, dirP
 			}
 		case fs.Directory:
 			isSubdir[entry.Remote()] = true
-			wrapDir := fs.NewDirCopy(ctx, entry)
-			wrapDir.SetRemote(entry.Remote())
+			wrapDir := fs.NewDirWrapper(entry.Remote(), entry)
 			tempEntries = append(tempEntries, wrapDir)
 		default:
 			if f.opt.FailHard {
@@ -868,7 +880,6 @@ func (f *Fs) processEntries(ctx context.Context, origEntries fs.DirEntries, dirP
 // Note that chunker prefers analyzing file names rather than reading
 // the content of meta object assuming that directory scans are fast
 // but opening even a small file can be slow on some backends.
-//
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	return f.scanObject(ctx, remote, false)
 }
@@ -953,6 +964,11 @@ func (f *Fs) scanObject(ctx context.Context, remote string, quickScan bool) (fs.
 		}
 		if caseInsensitive {
 			sameMain = strings.EqualFold(mainRemote, remote)
+			if sameMain && f.base.Features().IsLocal {
+				// on local, make sure the EqualFold still holds true when accounting for encoding.
+				// sometimes paths with special characters will only normalize the same way in Standard Encoding.
+				sameMain = strings.EqualFold(encoder.OS.FromStandardPath(mainRemote), encoder.OS.FromStandardPath(remote))
+			}
 		} else {
 			sameMain = mainRemote == remote
 		}
@@ -966,13 +982,13 @@ func (f *Fs) scanObject(ctx context.Context, remote string, quickScan bool) (fs.
 			}
 			continue
 		}
-		//fs.Debugf(f, "%q belongs to %q as chunk %d", entryRemote, mainRemote, chunkNo)
+		// fs.Debugf(f, "%q belongs to %q as chunk %d", entryRemote, mainRemote, chunkNo)
 		if err := o.addChunk(entry, chunkNo); err != nil {
 			return nil, err
 		}
 	}
 
-	if o.main == nil && (o.chunks == nil || len(o.chunks) == 0) {
+	if o.main == nil && len(o.chunks) == 0 {
 		// Scanning hasn't found data chunks with conforming names.
 		if f.useMeta || quickScan {
 			// Metadata is required but absent and there are no chunks.
@@ -1043,7 +1059,7 @@ func (o *Object) readMetadata(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	metadata, err := ioutil.ReadAll(reader)
+	metadata, err := io.ReadAll(reader)
 	_ = reader.Close() // ensure file handle is freed on windows
 	if err != nil {
 		return err
@@ -1084,7 +1100,7 @@ func (o *Object) readMetadata(ctx context.Context) error {
 
 // readXactID returns the transaction ID stored in the passed metadata object
 func (o *Object) readXactID(ctx context.Context) (xactID string, err error) {
-	// if xactID has already been read and cahced return it now
+	// if xactID has already been read and cached return it now
 	if o.xIDCached {
 		return o.xactID, nil
 	}
@@ -1102,7 +1118,7 @@ func (o *Object) readXactID(ctx context.Context) (xactID string, err error) {
 	if err != nil {
 		return "", err
 	}
-	data, err := ioutil.ReadAll(reader)
+	data, err := io.ReadAll(reader)
 	_ = reader.Close() // ensure file handle is freed on windows
 	if err != nil {
 		return "", err
@@ -1128,8 +1144,8 @@ func (o *Object) readXactID(ctx context.Context) (xactID string, err error) {
 // put implements Put, PutStream, PutUnchecked, Update
 func (f *Fs) put(
 	ctx context.Context, in io.Reader, src fs.ObjectInfo, remote string, options []fs.OpenOption,
-	basePut putFn, action string, target fs.Object) (obj fs.Object, err error) {
-
+	basePut putFn, action string, target fs.Object,
+) (obj fs.Object, err error) {
 	// Perform consistency checks
 	if err := f.forbidChunk(src, remote); err != nil {
 		return nil, fmt.Errorf("%s refused: %w", action, err)
@@ -1174,10 +1190,7 @@ func (f *Fs) put(
 		}
 
 		tempRemote := f.makeChunkName(baseRemote, c.chunkNo, "", xactID)
-		size := c.sizeLeft
-		if size > c.chunkSize {
-			size = c.chunkSize
-		}
+		size := min(c.sizeLeft, c.chunkSize)
 		savedReadCount := c.readCount
 
 		// If a single chunk is expected, avoid the extra rename operation
@@ -1462,10 +1475,7 @@ func (c *chunkingReader) dummyRead(in io.Reader, size int64) error {
 	const bufLen = 1048576 // 1 MiB
 	buf := make([]byte, bufLen)
 	for size > 0 {
-		n := size
-		if n > bufLen {
-			n = bufLen
-		}
+		n := min(size, bufLen)
 		if _, err := io.ReadFull(in, buf[0:n]); err != nil {
 			return err
 		}
@@ -1569,6 +1579,14 @@ func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 	return f.base.Mkdir(ctx, dir)
 }
 
+// MkdirMetadata makes the root directory of the Fs object
+func (f *Fs) MkdirMetadata(ctx context.Context, dir string, metadata fs.Metadata) (fs.Directory, error) {
+	if do := f.base.Features().MkdirMetadata; do != nil {
+		return do(ctx, dir, metadata)
+	}
+	return nil, fs.ErrorNotImplemented
+}
+
 // Rmdir removes the directory (container, bucket) if empty
 //
 // Return an error if it doesn't exist or isn't empty
@@ -1586,7 +1604,6 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 // This command will chain to `purge` from wrapped remote.
 // As a result it removes not only composite chunker files with their
 // active chunks but also all hidden temporary chunks in the directory.
-//
 func (f *Fs) Purge(ctx context.Context, dir string) error {
 	do := f.base.Features().Purge
 	if do == nil {
@@ -1628,7 +1645,6 @@ func (f *Fs) Purge(ctx context.Context, dir string) error {
 // Unsupported control chunks will get re-picked by a more recent
 // rclone version with unexpected results. This can be helped by
 // the `delete hidden` flag above or at least the user has been warned.
-//
 func (o *Object) Remove(ctx context.Context) (err error) {
 	if err := o.f.forbidChunk(o, o.Remote()); err != nil {
 		// operations.Move can still call Remove if chunker's Move refuses
@@ -1804,9 +1820,9 @@ func (f *Fs) okForServerSide(ctx context.Context, src fs.Object, opName string) 
 
 // Copy src to this remote using server-side copy operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -1825,9 +1841,9 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 
 // Move src to this remote using server-side move operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -1845,6 +1861,8 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 
 // baseMove chains to the wrapped Move or simulates it by Copy+Delete
 func (f *Fs) baseMove(ctx context.Context, src fs.Object, remote string, delMode int) (fs.Object, error) {
+	ctx, ci := fs.AddConfig(ctx)
+	ci.NameTransform = nil // ensure operations.Move does not double-transform here
 	var (
 		dest fs.Object
 		err  error
@@ -1886,6 +1904,14 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 		return fs.ErrorCantDirMove
 	}
 	return do(ctx, srcFs.base, srcRemote, dstRemote)
+}
+
+// DirSetModTime sets the directory modtime for dir
+func (f *Fs) DirSetModTime(ctx context.Context, dir string, modTime time.Time) error {
+	if do := f.base.Features().DirSetModTime; do != nil {
+		return do(ctx, dir, modTime)
+	}
+	return fs.ErrorNotImplemented
 }
 
 // CleanUp the trash in the Fs
@@ -1936,7 +1962,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 		return
 	}
 	wrappedNotifyFunc := func(path string, entryType fs.EntryType) {
-		//fs.Debugf(f, "ChangeNotify: path %q entryType %d", path, entryType)
+		// fs.Debugf(f, "ChangeNotify: path %q entryType %d", path, entryType)
 		if entryType == fs.EntryObject {
 			mainPath, _, _, xactID := f.parseChunkName(path)
 			metaXactID := ""
@@ -2125,7 +2151,6 @@ func (o *Object) SetModTime(ctx context.Context, mtime time.Time) error {
 // file, then tries to read it from metadata. This in theory
 // handles the unusual case when a small file has been tampered
 // on the level of wrapped remote but chunker is unaware of that.
-//
 func (o *Object) Hash(ctx context.Context, hashType hash.Type) (string, error) {
 	if err := o.readMetadata(ctx); err != nil {
 		return "", err // valid metadata is required to get hash, abort
@@ -2414,7 +2439,6 @@ type metaSimpleJSON struct {
 // - for files larger than chunk size
 // - if file contents can be mistaken as meta object
 // - if consistent hashing is On but wrapped remote can't provide given hash
-//
 func marshalSimpleJSON(ctx context.Context, size int64, nChunks int, md5, sha1, xactID string) ([]byte, error) {
 	version := metadataVersion
 	if xactID == "" && version == 2 {
@@ -2447,14 +2471,13 @@ func marshalSimpleJSON(ctx context.Context, size int64, nChunks int, md5, sha1, 
 // New format will have a higher version number and cannot be correctly
 // handled by current implementation.
 // The version check below will then explicitly ask user to upgrade rclone.
-//
 func unmarshalSimpleJSON(ctx context.Context, metaObject fs.Object, data []byte) (info *ObjectInfo, madeByChunker bool, err error) {
 	// Be strict about JSON format
 	// to reduce possibility that a random small file resembles metadata.
 	if len(data) > maxMetadataSizeWritten {
 		return nil, false, ErrMetaTooBig
 	}
-	if data == nil || len(data) < 2 || data[0] != '{' || data[len(data)-1] != '}' {
+	if len(data) < 2 || data[0] != '{' || data[len(data)-1] != '}' {
 		return nil, false, errors.New("invalid json")
 	}
 	var metadata metaSimpleJSON
@@ -2551,6 +2574,8 @@ var (
 	_ fs.Copier          = (*Fs)(nil)
 	_ fs.Mover           = (*Fs)(nil)
 	_ fs.DirMover        = (*Fs)(nil)
+	_ fs.DirSetModTimer  = (*Fs)(nil)
+	_ fs.MkdirMetadataer = (*Fs)(nil)
 	_ fs.PutUncheckeder  = (*Fs)(nil)
 	_ fs.PutStreamer     = (*Fs)(nil)
 	_ fs.CleanUpper      = (*Fs)(nil)

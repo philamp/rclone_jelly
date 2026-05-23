@@ -1,5 +1,4 @@
 //go:build ignore
-// +build ignore
 
 package main
 
@@ -9,8 +8,8 @@ import (
 	"encoding/base64"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"math"
+	"os"
 	"strings"
 	"unicode/utf8"
 
@@ -43,7 +42,7 @@ func main() {
 		for i := range histogram[:] {
 			histogram[i] = 0
 		}
-		b, err := ioutil.ReadFile(*indexFile)
+		b, err := os.ReadFile(*indexFile)
 		if err != nil {
 			panic(err)
 		}

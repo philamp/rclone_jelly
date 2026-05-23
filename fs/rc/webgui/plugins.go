@@ -1,10 +1,10 @@
+// Package webgui provides plugin functionality to the Web GUI.
 package webgui
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -16,7 +16,7 @@ import (
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
-	"github.com/rclone/rclone/fs/rc/rcflags"
+	"github.com/rclone/rclone/fs/rc"
 )
 
 // PackageJSON is the structure of package.json of a plugin
@@ -83,7 +83,7 @@ func newPlugins(fileName string) *Plugins {
 }
 
 func initPluginsOrError() error {
-	if !rcflags.Opt.WebUI {
+	if !rc.Opt.WebUI {
 		return errors.New("WebUI needs to be enabled for plugins to work")
 	}
 	initMutex.Lock()
@@ -111,7 +111,7 @@ func (p *Plugins) readFromFile() (err error) {
 	availablePluginsJSON := filepath.Join(pluginsConfigPath, p.fileName)
 	_, err = os.Stat(availablePluginsJSON)
 	if err == nil {
-		data, err := ioutil.ReadFile(availablePluginsJSON)
+		data, err := os.ReadFile(availablePluginsJSON)
 		if err != nil {
 			return err
 		}
@@ -133,7 +133,7 @@ func (p *Plugins) readFromFile() (err error) {
 func (p *Plugins) addPlugin(pluginName string, packageJSONPath string) (err error) {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
-	data, err := ioutil.ReadFile(packageJSONPath)
+	data, err := os.ReadFile(packageJSONPath)
 	if err != nil {
 		return err
 	}
@@ -152,33 +152,6 @@ func (p *Plugins) addPlugin(pluginName string, packageJSONPath string) (err erro
 	return nil
 }
 
-func (p *Plugins) addTestPlugin(pluginName string, testURL string, handlesType []string) (err error) {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
-	err = p.readFromFile()
-	if err != nil {
-		return err
-	}
-
-	var pkgJSON = PackageJSON{
-		Name:    pluginName,
-		TestURL: testURL,
-		Rclone: RcloneConfig{
-			HandlesType: handlesType,
-			Test:        true,
-		},
-	}
-
-	p.LoadedPlugins[pluginName] = pkgJSON
-
-	err = p.writeToFile()
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
 func (p *Plugins) writeToFile() (err error) {
 	availablePluginsJSON := filepath.Join(pluginsConfigPath, p.fileName)
 
@@ -186,7 +159,7 @@ func (p *Plugins) writeToFile() (err error) {
 	if err != nil {
 		fs.Logf(nil, "%s", err)
 	}
-	err = ioutil.WriteFile(availablePluginsJSON, file, 0755)
+	err = os.WriteFile(availablePluginsJSON, file, 0755)
 	if err != nil {
 		fs.Logf(nil, "%s", err)
 	}
@@ -226,14 +199,14 @@ func (p *Plugins) GetPluginByName(name string) (out *PackageJSON, err error) {
 
 }
 
-// getAuthorRepoBranchGithub gives author, repoName and branch from a github.com url
+// getAuthorRepoBranchGitHub gives author, repoName and branch from a github.com url
+//
 //	url examples:
 //	https://github.com/rclone/rclone-webui-react/
 //	http://github.com/rclone/rclone-webui-react
 //	https://github.com/rclone/rclone-webui-react/tree/caman-js
-// 	github.com/rclone/rclone-webui-react
-//
-func getAuthorRepoBranchGithub(url string) (author string, repoName string, branch string, err error) {
+//	github.com/rclone/rclone-webui-react
+func getAuthorRepoBranchGitHub(url string) (author string, repoName string, branch string, err error) {
 	repoURL := url
 	repoURL = strings.Replace(repoURL, "https://", "", 1)
 	repoURL = strings.Replace(repoURL, "http://", "", 1)
@@ -293,7 +266,7 @@ func ServePluginOK(w http.ResponseWriter, r *http.Request, pluginsMatchResult []
 	return true
 }
 
-var referrerPathReg = regexp.MustCompile("^(https?):\\/\\/(.+):([0-9]+)?\\/(.*)\\/?\\?(.*)$")
+var referrerPathReg = regexp.MustCompile(`^(https?):\/\/(.+):([0-9]+)?\/(.*)\/?\?(.*)$`)
 
 // ServePluginWithReferrerOK check if redirectReferrer is set for the referred a plugin, if yes,
 // sends a redirect to actual url. This function is useful for plugins to refer to absolute paths when
@@ -306,9 +279,9 @@ func ServePluginWithReferrerOK(w http.ResponseWriter, r *http.Request, path stri
 	referrer := r.Referer()
 	referrerPathMatch := referrerPathReg.FindStringSubmatch(referrer)
 
-	if referrerPathMatch != nil && len(referrerPathMatch) > 3 {
+	if len(referrerPathMatch) > 3 {
 		referrerPluginMatch := PluginsMatch.FindStringSubmatch(referrerPathMatch[4])
-		if referrerPluginMatch != nil && len(referrerPluginMatch) > 2 {
+		if len(referrerPluginMatch) > 2 {
 			pluginKey := fmt.Sprintf("%s/%s", referrerPluginMatch[1], referrerPluginMatch[2])
 			currentPlugin, err := loadedPlugins.GetPluginByName(pluginKey)
 			if err != nil {

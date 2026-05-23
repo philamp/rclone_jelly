@@ -1,5 +1,4 @@
 //go:build linux || freebsd
-// +build linux freebsd
 
 package docker
 
@@ -25,7 +24,7 @@ func newUnixListener(path string, gid int) (net.Listener, string, error) {
 		return nil, "", fmt.Errorf("expected only one socket from systemd, got %d", len(fds))
 	}
 
-	// create socket outselves
+	// create socket ourselves
 	if filepath.Ext(path) == "" {
 		path += ".sock"
 	}

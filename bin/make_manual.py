@@ -7,6 +7,7 @@ conversion into man pages etc.
 import os
 import re
 import time
+import subprocess
 from datetime import datetime
 
 docpath = "docs/content"
@@ -22,54 +23,77 @@ docs = [
     "gui.md",
     "rc.md",
     "overview.md",
+    "tiers.md",
     "flags.md",
     "docker.md",
     "bisync.md",
+    "release_signing.md",
 
     # Keep these alphabetical by full name
     "fichier.md",
     "alias.md",
-    "amazonclouddrive.md",
     "s3.md",
+    "archive.md",
     "b2.md",
     "box.md",
     "cache.md",
     "chunker.md",
+    "cloudinary.md",
     "sharefile.md",
     "crypt.md",
     "compress.md",
+    "combine.md",
+    "doi.md",
+    "drime.md",
     "dropbox.md",
     "filefabric.md",
+    "filelu.md",
+    "filen.md",
+    "filescom.md",
     "ftp.md",
+    "gofile.md",
     "googlecloudstorage.md",
     "drive.md",
     "googlephotos.md",
     "hasher.md",
+    "huaweidrive.md",
     "hdfs.md",
+    "hidrive.md",
     "http.md",
-    "hubic.md",
+    "imagekit.md",
+    "iclouddrive.md",
     "internetarchive.md",
+    "internxt.md",
     "jottacloud.md",
     "koofr.md",
+    "linkbox.md",
     "mailru.md",
     "mega.md",
     "memory.md",
     "netstorage.md",
     "azureblob.md",
+    "azurefiles.md",
     "onedrive.md",
     "opendrive.md",
+    "oracleobjectstorage/_index.md",
     "qingstor.md",
+    "quatrix.md",
     "sia.md",
     "swift.md",
     "pcloud.md",
+    "pikpak.md",
+    "pixeldrain.md",
     "premiumizeme.md",
+    "protondrive.md",
     "putio.md",
+    "protondrive.md",
     "seafile.md",
     "sftp.md",
+    "shade.md",
+    "smb.md",
     "storj.md",
     "sugarsync.md",
-    "tardigrade.md",            # stub only to redirect to storj.md
-    "uptobox.md",
+    "ulozto.md",
     "union.md",
     "webdav.md",
     "yandex.md",
@@ -110,7 +134,9 @@ commands_order = [
 ignore_docs = [
     "downloads.md",
     "privacy.md",
-    "donate.md",
+    "sponsor.md",
+    "amazonclouddrive.md",
+    "backends.md",              # Makes JSON confusingly
 ]
 
 def read_doc(doc):
@@ -120,7 +146,7 @@ def read_doc(doc):
         contents = fd.read()
     parts = contents.split("---\n", 2)
     if len(parts) != 3:
-        raise ValueError("Couldn't find --- markers: found %d parts" % len(parts))
+        raise ValueError(f"{doc}: Couldn't find --- markers: found {len(parts)} parts")
     contents = parts[2].strip()+"\n\n"
     # Remove icons
     contents = re.sub(r'<i class="fa.*?</i>\s*', "", contents)
@@ -132,7 +158,7 @@ def read_doc(doc):
     # Make [...](/links/) absolute
     contents = re.sub(r'\]\((\/.*?\/(#.*)?)\)', r"](https://rclone.org\1)", contents)
     # Add additional links on the front page
-    contents = re.sub(r'\{\{< rem MAINPAGELINK >\}\}', "- [Donate.](https://rclone.org/donate/)", contents)
+    contents = re.sub(r'<!-- MAINPAGELINK -->', "- [Donate.](https://rclone.org/donate/)", contents)
     # Interpret provider shortcode
     # {{< provider name="Amazon S3" home="https://aws.amazon.com/s3/" config="/s3/" >}}
     contents = re.sub(r'\{\{<\s*provider.*?name="(.*?)".*?>\}\}', r"- \1", contents)
@@ -144,6 +170,7 @@ def read_doc(doc):
 def check_docs(docpath):
     """Check all the docs are in docpath"""
     files = set(f for f in os.listdir(docpath) if f.endswith(".md"))
+    files.update(f for f in docs if os.path.exists(os.path.join(docpath,f)))
     files -= set(ignore_docs)
     docs_set = set(docs)
     if files == docs_set:
@@ -175,13 +202,23 @@ def main():
     command_docs = read_commands(docpath).replace("\\", "\\\\") # escape \ so we can use command_docs in re.sub
     build_date = datetime.utcfromtimestamp(
             int(os.environ.get('SOURCE_DATE_EPOCH', time.time())))
+    help_output = subprocess.check_output(["rclone", "help"]).decode("utf-8")
     with open(outfile, "w") as out:
         out.write("""\
 %% rclone(1) User Manual
 %% Nick Craig-Wood
 %% %s
 
-""" % build_date.strftime("%b %d, %Y"))
+# NAME
+
+rclone - manage files on cloud storage
+
+# SYNOPSIS
+
+```
+%s
+```
+""" % (build_date.strftime("%b %d, %Y"), help_output))
         for doc in docs:
             contents = read_doc(doc)
             # Substitute the commands into doc.md

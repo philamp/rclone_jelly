@@ -4,28 +4,28 @@
 // We skip tests on platforms with troublesome character mappings
 
 //go:build !windows && !darwin
-// +build !windows,!darwin
 
 package webdav
 
 import (
+	"compress/gzip"
 	"context"
 	"flag"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	_ "github.com/rclone/rclone/backend/local"
-	"github.com/rclone/rclone/cmd/serve/httplib"
+	"github.com/rclone/rclone/cmd/serve/proxy"
 	"github.com/rclone/rclone/cmd/serve/servetest"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/obscure"
 	"github.com/rclone/rclone/fs/filter"
-	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fs/rc"
+	"github.com/rclone/rclone/vfs/vfscommon"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/webdav"
@@ -40,9 +40,9 @@ const (
 
 // check interfaces
 var (
-	_ os.FileInfo         = FileInfo{nil}
-	_ webdav.ETager       = FileInfo{nil}
-	_ webdav.ContentTyper = FileInfo{nil}
+	_ os.FileInfo         = FileInfo{nil, nil}
+	_ webdav.ETager       = FileInfo{nil, nil}
+	_ webdav.ContentTyper = FileInfo{nil, nil}
 )
 
 // TestWebDav runs the webdav server then runs the unit tests for the
@@ -50,29 +50,32 @@ var (
 func TestWebDav(t *testing.T) {
 	// Configure and start the server
 	start := func(f fs.Fs) (configmap.Simple, func()) {
-		opt := httplib.DefaultOpt
-		opt.ListenAddr = testBindAddress
-		opt.BasicUser = testUser
-		opt.BasicPass = testPass
-		opt.Template = testTemplate
-		hashType = hash.MD5
+		opt := Opt
+		opt.HTTP.ListenAddr = []string{testBindAddress}
+		opt.HTTP.BaseURL = "/prefix"
+		opt.Auth.BasicUser = testUser
+		opt.Auth.BasicPass = testPass
+		opt.Template.Path = testTemplate
+		opt.EtagHash = "MD5"
 
 		// Start the server
-		w := newWebDAV(context.Background(), f, &opt)
-		assert.NoError(t, w.serve())
+		w, err := newWebDAV(context.Background(), f, &opt, &vfscommon.Opt, &proxy.Opt)
+		require.NoError(t, err)
+		go func() {
+			require.NoError(t, w.Serve())
+		}()
 
 		// Config for the backend we'll use to connect to the server
 		config := configmap.Simple{
 			"type":   "webdav",
-			"vendor": "other",
-			"url":    w.Server.URL(),
+			"vendor": "rclone",
+			"url":    w.server.URLs()[0],
 			"user":   testUser,
 			"pass":   obscure.MustObscure(testPass),
 		}
 
 		return config, func() {
-			w.Close()
-			w.Wait()
+			assert.NoError(t, w.Shutdown())
 		}
 	}
 
@@ -98,34 +101,20 @@ func TestHTTPFunction(t *testing.T) {
 	f, err := fs.NewFs(context.Background(), "../http/testdata/files")
 	assert.NoError(t, err)
 
-	opt := httplib.DefaultOpt
-	opt.ListenAddr = testBindAddress
-	opt.Template = testTemplate
+	opt := Opt
+	opt.HTTP.ListenAddr = []string{testBindAddress}
+	opt.Template.Path = testTemplate
 
 	// Start the server
-	w := newWebDAV(context.Background(), f, &opt)
-	assert.NoError(t, w.serve())
-	defer func() {
-		w.Close()
-		w.Wait()
+	w, err := newWebDAV(context.Background(), f, &opt, &vfscommon.Opt, &proxy.Opt)
+	assert.NoError(t, err)
+	go func() {
+		require.NoError(t, w.Serve())
 	}()
-	testURL := w.Server.URL()
-	pause := time.Millisecond
-	i := 0
-	for ; i < 10; i++ {
-		resp, err := http.Head(testURL)
-		if err == nil {
-			_ = resp.Body.Close()
-			break
-		}
-		// t.Logf("couldn't connect, sleeping for %v: %v", pause, err)
-		time.Sleep(pause)
-		pause *= 2
-	}
-	if i >= 10 {
-		t.Fatal("couldn't connect to server")
-	}
-
+	defer func() {
+		assert.NoError(t, w.Shutdown())
+	}()
+	testURL := w.server.URLs()[0]
 	HelpTestGET(t, testURL)
 }
 
@@ -134,10 +123,10 @@ func TestHTTPFunction(t *testing.T) {
 func checkGolden(t *testing.T, fileName string, got []byte) {
 	if *updateGolden {
 		t.Logf("Updating golden file %q", fileName)
-		err := ioutil.WriteFile(fileName, got, 0666)
+		err := os.WriteFile(fileName, got, 0666)
 		require.NoError(t, err)
 	} else {
-		want, err := ioutil.ReadFile(fileName)
+		want, err := os.ReadFile(fileName)
 		require.NoError(t, err, "problem")
 		wants := strings.Split(string(want), "\n")
 		gots := strings.Split(string(got), "\n")
@@ -253,9 +242,113 @@ func HelpTestGET(t *testing.T, testURL string) {
 		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
 		assert.Equal(t, test.Status, resp.StatusCode, test.Golden)
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
 
 		checkGolden(t, test.Golden, body)
 	}
+}
+
+// startAuthenticatedServer creates a webdav server with basic auth against
+// the test files directory, starts it, waits for it to be ready, and returns
+// the base URL. It registers cleanup to shut the server down.
+func startAuthenticatedServer(t *testing.T) string {
+	t.Helper()
+
+	f, err := fs.NewFs(context.Background(), "../http/testdata/files")
+	require.NoError(t, err)
+
+	opt := Opt
+	opt.HTTP.ListenAddr = []string{testBindAddress}
+	opt.Template.Path = testTemplate
+	opt.Auth.BasicUser = testUser
+	opt.Auth.BasicPass = testPass
+
+	w, err := newWebDAV(context.Background(), f, &opt, &vfscommon.Opt, &proxy.Opt)
+	require.NoError(t, err)
+	go func() {
+		require.NoError(t, w.Serve())
+	}()
+	t.Cleanup(func() {
+		assert.NoError(t, w.Shutdown())
+	})
+
+	testURL := w.server.URLs()[0]
+	return testURL
+}
+
+func TestCompressedTextFile(t *testing.T) {
+	testURL := startAuthenticatedServer(t)
+
+	req, err := http.NewRequest("GET", testURL+"two.txt", nil)
+	require.NoError(t, err)
+	req.SetBasicAuth(testUser, testPass)
+	req.Header.Set("Accept-Encoding", "gzip")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "gzip", resp.Header.Get("Content-Encoding"))
+
+	gr, err := gzip.NewReader(resp.Body)
+	require.NoError(t, err)
+	defer func() { _ = gr.Close() }()
+
+	body, err := io.ReadAll(gr)
+	require.NoError(t, err)
+	assert.Equal(t, "0123456789\n", string(body))
+}
+
+func TestCompressedPROPFIND(t *testing.T) {
+	testURL := startAuthenticatedServer(t)
+
+	req, err := http.NewRequest("PROPFIND", testURL, nil)
+	require.NoError(t, err)
+	req.SetBasicAuth(testUser, testPass)
+	req.Header.Set("Depth", "1")
+	req.Header.Set("Accept-Encoding", "gzip")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusMultiStatus, resp.StatusCode)
+	assert.Equal(t, "gzip", resp.Header.Get("Content-Encoding"))
+
+	gr, err := gzip.NewReader(resp.Body)
+	require.NoError(t, err)
+	defer func() { _ = gr.Close() }()
+
+	body, err := io.ReadAll(gr)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "multistatus")
+}
+
+func TestRangeRequestNotCompressed(t *testing.T) {
+	testURL := startAuthenticatedServer(t)
+
+	req, err := http.NewRequest("GET", testURL+"two.txt", nil)
+	require.NoError(t, err)
+	req.SetBasicAuth(testUser, testPass)
+	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("Range", "bytes=2-5")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusPartialContent, resp.StatusCode)
+	assert.Empty(t, resp.Header.Get("Content-Encoding"))
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "2345", string(body))
+}
+
+func TestRc(t *testing.T) {
+	servetest.TestRc(t, rc.Params{
+		"type":           "webdav",
+		"vfs_cache_mode": "off",
+	})
 }

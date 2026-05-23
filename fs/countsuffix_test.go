@@ -9,8 +9,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Check it satisfies the interface
-var _ flagger = (*CountSuffix)(nil)
+// Check it satisfies the interfaces
+var (
+	_ Flagger   = (*CountSuffix)(nil)
+	_ FlaggerNP = CountSuffix(0)
+)
 
 func TestCountSuffixString(t *testing.T) {
 	for _, test := range []struct {

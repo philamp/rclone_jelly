@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	sysdnotify "github.com/iguanesolutions/go-systemd/v5/notify"
 	"github.com/rclone/rclone/fs"
 	fscache "github.com/rclone/rclone/fs/cache"
 	"github.com/rclone/rclone/fs/config"
@@ -22,8 +21,10 @@ import (
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fs/rc"
+	"github.com/rclone/rclone/lib/diskusage"
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/file"
+	"github.com/rclone/rclone/lib/systemd"
 	"github.com/rclone/rclone/vfs/vfscache/writeback"
 	"github.com/rclone/rclone/vfs/vfscommon"
 )
@@ -40,6 +41,7 @@ import (
 // Cache opened files
 type Cache struct {
 	// read only - no locking needed to read these
+	ctx        context.Context      // context for cache lifetime
 	fremote    fs.Fs                // fs for the remote we are caching
 	fcache     fs.Fs                // fs for the cache directory
 	fcacheMeta fs.Fs                // fs for the cache metadata directory
@@ -52,7 +54,7 @@ type Cache struct {
 	avFn       AddVirtualFn         // if set, can be called to add dir entries
 
 	mu            sync.Mutex       // protects the following variables
-	cond          *sync.Cond       // cond lock for synchronous cache cleaning
+	cond          sync.Cond        // cond lock for synchronous cache cleaning
 	item          map[string]*Item // files/directories in the cache
 	errItems      map[string]error // items in error state
 	used          int64            // total size of files in the cache
@@ -84,7 +86,7 @@ func New(ctx context.Context, fremote fs.Fs, opt *vfscommon.Options, avFn AddVir
 	// drive letter is not encoded (e.g. into unicode fullwidth colon).
 	var err error
 	parentOSPath := config.GetCacheDir() // Assuming string contains a local absolute path in OS encoding
-	fs.Debugf(nil, "vfs cache: root is %q", parentOSPath)
+	fs.Debugf(fremote, "vfs cache: root is %q", parentOSPath)
 	parentPath := fromOSPath(parentOSPath)
 
 	// Get a relative cache path representing the remote.
@@ -102,8 +104,8 @@ func New(ctx context.Context, fremote fs.Fs, opt *vfscommon.Options, avFn AddVir
 	if dataOSPath, metaOSPath, err = createRootDirs(parentOSPath, relativeDirOSPath); err != nil {
 		return nil, err
 	}
-	fs.Debugf(nil, "vfs cache: data root is %q", dataOSPath)
-	fs.Debugf(nil, "vfs cache: metadata root is %q", metaOSPath)
+	fs.Debugf(fremote, "vfs cache: data root is %q", dataOSPath)
+	fs.Debugf(fremote, "vfs cache: metadata root is %q", metaOSPath)
 
 	// Get (create) cache backends
 	var fdata, fmeta fs.Fs
@@ -114,6 +116,7 @@ func New(ctx context.Context, fremote fs.Fs, opt *vfscommon.Options, avFn AddVir
 
 	// Create the cache object
 	c := &Cache{
+		ctx:        ctx,
 		fremote:    fremote,
 		fcache:     fdata,
 		fcacheMeta: fmeta,
@@ -139,7 +142,7 @@ func New(ctx context.Context, fremote fs.Fs, opt *vfscommon.Options, avFn AddVir
 
 	// Create a channel for cleaner to be kicked upon out of space con
 	c.kick = make(chan struct{}, 1)
-	c.cond = sync.NewCond(&c.mu)
+	c.cond = sync.Cond{L: &c.mu}
 
 	go c.cleaner(ctx)
 
@@ -167,6 +170,21 @@ func (c *Cache) Stats() (out rc.Params) {
 	out["outOfSpace"] = c.outOfSpace
 
 	return out
+}
+
+// Queue returns info about the Cache
+func (c *Cache) Queue() (out rc.Params) {
+	out = make(rc.Params)
+	out["queue"] = c.writeback.Queue()
+	return out
+}
+
+// QueueSetExpiry updates the expiry of a single item in the upload queue
+//
+// The expiry time is set to expiry + relative if expiry is passed in,
+// otherwise the expiry of the item is used.
+func (c *Cache) QueueSetExpiry(id writeback.Handle, expiry time.Time, relative time.Duration) error {
+	return c.writeback.SetExpiry(id, expiry, relative)
 }
 
 // createDir creates a directory path, along with any necessary parents
@@ -211,7 +229,10 @@ func (c *Cache) createItemDir(name string) (string, error) {
 
 // getBackend gets a backend for a cache root dir
 func getBackend(ctx context.Context, parentPath string, name string, relativeDirPath string) (fs.Fs, error) {
-	path := fmt.Sprintf("%s/%s/%s", parentPath, name, relativeDirPath)
+	// Make sure we turn off the global links flag as it overrides the backend specific one
+	ctx, ci := fs.AddConfig(ctx)
+	ci.Links = false
+	path := fmt.Sprintf(":local,encoding='%v',links=false:%s/%s/%s", encoder.OS, parentPath, name, relativeDirPath)
 	return fscache.Get(ctx, path)
 }
 
@@ -339,7 +360,7 @@ func (c *Cache) get(name string) (item *Item, found bool) {
 
 // Item gets a cache item for name
 //
-// To use it item.Open will need to be called
+// To use it item.Open will need to be called.
 //
 // name should be a remote path not an osPath
 func (c *Cache) Item(name string) (item *Item) {
@@ -545,14 +566,14 @@ func (c *Cache) KickCleaner() {
 	/* Use a separate kicker mutex for the kick to go through without waiting for the
 	   cache mutex to avoid letting a thread kick again after the clearer just
 	   finished cleaning and unlock the cache mutex. */
-	fs.Debugf(nil, "vfs cache: at the beginning of KickCleaner")
+	fs.Debugf(c.fremote, "vfs cache: at the beginning of KickCleaner")
 	c.kickerMu.Lock()
 	if !c.cleanerKicked {
 		c.cleanerKicked = true
-		fs.Debugf(nil, "vfs cache: in KickCleaner, ready to lock cache mutex")
+		fs.Debugf(c.fremote, "vfs cache: in KickCleaner, ready to lock cache mutex")
 		c.mu.Lock()
 		c.outOfSpace = true
-		fs.Logf(nil, "vfs cache: in KickCleaner, ready to kick cleaner")
+		fs.Logf(c.fremote, "vfs cache: in KickCleaner, ready to kick cleaner")
 		c.kick <- struct{}{}
 		c.mu.Unlock()
 	}
@@ -560,10 +581,10 @@ func (c *Cache) KickCleaner() {
 
 	c.mu.Lock()
 	for c.outOfSpace {
-		fs.Debugf(nil, "vfs cache: in KickCleaner, looping on c.outOfSpace")
+		fs.Debugf(c.fremote, "vfs cache: in KickCleaner, looping on c.outOfSpace")
 		c.cond.Wait()
 	}
-	fs.Debugf(nil, "vfs cache: in KickCleaner, leaving c.outOfSpace loop")
+	fs.Debugf(c.fremote, "vfs cache: in KickCleaner, leaving c.outOfSpace loop")
 	c.mu.Unlock()
 }
 
@@ -575,11 +596,11 @@ func (c *Cache) removeNotInUse(item *Item, maxAge time.Duration, emptyOnly bool)
 	// The item will not be removed or reset the cache data is dirty (DataDirty)
 	c.used -= spaceFreed
 	if removed {
-		fs.Infof(nil, "vfs cache RemoveNotInUse (maxAge=%d, emptyOnly=%v): item %s was removed, freed %d bytes", maxAge, emptyOnly, item.GetName(), spaceFreed)
+		fs.Infof(c.fremote, "vfs cache RemoveNotInUse (maxAge=%d, emptyOnly=%v): item %s was removed, freed %d bytes", maxAge, emptyOnly, item.GetName(), spaceFreed)
 		// Remove the entry
 		delete(c.item, item.name)
 	} else {
-		fs.Debugf(nil, "vfs cache RemoveNotInUse (maxAge=%d, emptyOnly=%v): item %s not removed, freed %d bytes", maxAge, emptyOnly, item.GetName(), spaceFreed)
+		fs.Debugf(c.fremote, "vfs cache RemoveNotInUse (maxAge=%d, emptyOnly=%v): item %s not removed, freed %d bytes", maxAge, emptyOnly, item.GetName(), spaceFreed)
 	}
 }
 
@@ -589,7 +610,7 @@ func (c *Cache) retryFailedResets() {
 	// for saving the cache item's metadata.  Redo the Reset()'s here now that
 	// we may have some available space.
 	if len(c.errItems) != 0 {
-		fs.Debugf(nil, "vfs cache reset: before redoing reset errItems = %v", c.errItems)
+		fs.Debugf(c.fremote, "vfs cache reset: before redoing reset errItems = %v", c.errItems)
 		for itemName := range c.errItems {
 			if retryItem, ok := c.item[itemName]; ok {
 				_, _, err := retryItem.Reset()
@@ -603,19 +624,20 @@ func (c *Cache) retryFailedResets() {
 				delete(c.errItems, itemName)
 			}
 		}
-		fs.Debugf(nil, "vfs cache reset: after redoing reset errItems = %v", c.errItems)
+		fs.Debugf(c.fremote, "vfs cache reset: after redoing reset errItems = %v", c.errItems)
 	}
 }
 
-func (c *Cache) purgeClean(quota int64) {
+// Remove cache files that are not dirty until the quota is satisfied
+func (c *Cache) purgeClean() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	var items Items
-
-	if quota <= 0 || c.used < quota {
+	if c.quotasOK() {
 		return
 	}
+
+	var items Items
 
 	// Make a slice of clean cache files
 	for _, item := range c.item {
@@ -628,24 +650,24 @@ func (c *Cache) purgeClean(quota int64) {
 
 	// Reset items until the quota is OK
 	for _, item := range items {
-		if c.used < quota {
+		if c.quotasOK() {
 			break
 		}
 		resetResult, spaceFreed, err := item.Reset()
 		// The item space might be freed even if we get an error after the cache file is removed
 		// The item will not be removed or reset if the cache data is dirty (DataDirty)
 		c.used -= spaceFreed
-		fs.Infof(nil, "vfs cache purgeClean item.Reset %s: %s, freed %d bytes", item.GetName(), resetResult.String(), spaceFreed)
+		fs.Infof(c.fremote, "vfs cache purgeClean item.Reset %s: %s, freed %d bytes", item.GetName(), resetResult.String(), spaceFreed)
 		if resetResult == RemovedNotInUse {
 			delete(c.item, item.name)
 		}
 		if err != nil {
-			fs.Errorf(nil, "vfs cache purgeClean item.Reset %s reset failed, err = %v, freed %d bytes", item.GetName(), err, spaceFreed)
+			fs.Errorf(c.fremote, "vfs cache purgeClean item.Reset %s reset failed, err = %v, freed %d bytes", item.GetName(), err, spaceFreed)
 			c.errItems[item.name] = err
 		}
 	}
 
-	// Resest outOfSpace without checking whether we have reduced cache space below the quota.
+	// Reset outOfSpace without checking whether we have reduced cache space below the quota.
 	// This allows some files to reduce their pendingAccesses count to allow them to be reset
 	// in the next iteration of the purge cleaner loop.
 
@@ -661,7 +683,7 @@ func (c *Cache) purgeOld(maxAge time.Duration) {
 	for _, item := range c.item {
 		c.removeNotInUse(item, maxAge, false)
 	}
-	if c.used < int64(c.opt.CacheMaxSize) {
+	if c.quotasOK() {
 		c.outOfSpace = false
 		c.cond.Broadcast()
 	}
@@ -669,7 +691,7 @@ func (c *Cache) purgeOld(maxAge time.Duration) {
 
 // Purge any empty directories
 func (c *Cache) purgeEmptyDirs(dir string, leaveRoot bool) {
-	ctx := context.Background()
+	ctx := c.ctx
 	err := operations.Rmdirs(ctx, c.fcache, dir, leaveRoot)
 	if err != nil {
 		fs.Errorf(c.fcache, "vfs cache: failed to remove empty directories from cache path %q: %v", dir, err)
@@ -693,16 +715,53 @@ func (c *Cache) updateUsed() (used int64) {
 	return newUsed
 }
 
+// Check the available space for a disk is in limits.
+func (c *Cache) minFreeSpaceQuotaOK() bool {
+	if c.opt.CacheMinFreeSpace <= 0 {
+		return true
+	}
+	du, err := diskusage.New(config.GetCacheDir())
+	if err == diskusage.ErrUnsupported {
+		return true
+	}
+	if err != nil {
+		fs.Errorf(c.fremote, "disk usage returned error: %v", err)
+		return true
+	}
+	return du.Available >= uint64(c.opt.CacheMinFreeSpace)
+}
+
+// Check the available quota for a disk is in limits.
+//
+// must be called with mu held.
+func (c *Cache) maxSizeQuotaOK() bool {
+	if c.opt.CacheMaxSize <= 0 {
+		return true
+	}
+	return c.used <= int64(c.opt.CacheMaxSize)
+}
+
+// Check the available quotas for a disk is in limits.
+//
+// must be called with mu held.
+func (c *Cache) quotasOK() bool {
+	return c.maxSizeQuotaOK() && c.minFreeSpaceQuotaOK()
+}
+
+// Return true if any quotas set
+func (c *Cache) haveQuotas() bool {
+	return c.opt.CacheMaxSize > 0 || c.opt.CacheMinFreeSpace > 0
+}
+
 // Remove clean cache files that are not open until the total space
 // is reduced below quota starting from the oldest first
-func (c *Cache) purgeOverQuota(quota int64) {
+func (c *Cache) purgeOverQuota() {
 	c.updateUsed()
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if quota <= 0 || c.used < quota {
-
+	if c.quotasOK() {
 		return
 	}
 
@@ -719,9 +778,9 @@ func (c *Cache) purgeOverQuota(quota int64) {
 
 	// Remove items until the quota is OK
 	for _, item := range items {
-		c.removeNotInUse(item, 0, c.used <= quota)
+		c.removeNotInUse(item, 0, c.quotasOK())
 	}
-	if c.used < quota {
+	if c.quotasOK() {
 		c.outOfSpace = false
 		c.cond.Broadcast()
 	}
@@ -739,33 +798,23 @@ func (c *Cache) clean(kicked bool) {
 	oldItems, oldUsed := len(c.item), fs.SizeSuffix(c.used)
 	c.mu.Unlock()
 
-	// loop cleaning the cache until we reach below cache quota
-	for {
-		// Remove any files that are over age
-		c.purgeOld(c.opt.CacheMaxAge)
+	// Remove any files that are over age
+	c.purgeOld(time.Duration(c.opt.CacheMaxAge))
 
-		if int64(c.opt.CacheMaxSize) <= 0 {
-			break
-		}
-
-		// Now remove files not in use until cache size is below quota starting from the
-		// oldest first
-		c.purgeOverQuota(int64(c.opt.CacheMaxSize))
+	// If have a maximum cache size...
+	if c.haveQuotas() {
+		// Remove files not in use until cache size is below quota starting from the oldest first
+		c.purgeOverQuota()
 
 		// Remove cache files that are not dirty if we are still above the max cache size
-		c.purgeClean(int64(c.opt.CacheMaxSize))
+		c.purgeClean()
 		c.retryFailedResets()
-
-		used := c.updateUsed()
-		if used <= int64(c.opt.CacheMaxSize) && len(c.errItems) == 0 {
-			break
-		}
 	}
 
 	// Was kicked?
 	if kicked {
 		c.kickerMu.Lock() // Make sure this is called with cache mutex unlocked
-		// Reenable io threads to kick me
+		// Re-enable io threads to kick me
 		c.cleanerKicked = false
 		c.kickerMu.Unlock()
 	}
@@ -784,9 +833,9 @@ func (c *Cache) clean(kicked bool) {
 
 	stats := fmt.Sprintf("objects %d (was %d) in use %d, to upload %d, uploading %d, total size %v (was %v)",
 		newItems, oldItems, totalInUse, uploadsQueued, uploadsInProgress, newUsed, oldUsed)
-	fs.Infof(nil, "vfs cache: cleaned: %s", stats)
-	if err = sysdnotify.Status(fmt.Sprintf("[%s] vfs cache: %s", time.Now().Format("15:04"), stats)); err != nil {
-		fs.Errorf(nil, "vfs cache: updating systemd status with current stats failed: %s", err)
+	fs.Infof(c.fremote, "vfs cache: cleaned: %s", stats)
+	if err = systemd.UpdateStatus(fmt.Sprintf("[%s] vfs cache: %s", time.Now().Format("15:04"), stats)); err != nil {
+		fs.Errorf(c.fremote, "vfs cache: updating systemd status with current stats failed: %s", err)
 	}
 }
 
@@ -795,13 +844,13 @@ func (c *Cache) clean(kicked bool) {
 // doesn't return until context is cancelled
 func (c *Cache) cleaner(ctx context.Context) {
 	if c.opt.CachePollInterval <= 0 {
-		fs.Debugf(nil, "vfs cache: cleaning thread disabled because poll interval <= 0")
+		fs.Debugf(c.fremote, "vfs cache: cleaning thread disabled because poll interval <= 0")
 		return
 	}
 	// Start cleaning the cache immediately
 	c.clean(false)
 	// Then every interval specified
-	timer := time.NewTicker(c.opt.CachePollInterval)
+	timer := time.NewTicker(time.Duration(c.opt.CachePollInterval))
 	defer timer.Stop()
 	for {
 		select {
@@ -810,7 +859,7 @@ func (c *Cache) cleaner(ctx context.Context) {
 		case <-timer.C:
 			c.clean(false) // timer driven cache poll, kicked is false
 		case <-ctx.Done():
-			fs.Debugf(nil, "vfs cache: cleaner exiting")
+			fs.Debugf(c.fremote, "vfs cache: cleaner exiting")
 			return
 		}
 	}

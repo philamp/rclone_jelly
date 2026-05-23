@@ -1,9 +1,10 @@
 ---
 title: "FTP"
 description: "Rclone docs for FTP backend"
+versionIntroduced: "v1.37"
 ---
 
-# {{< icon "fa fa-file" >}} FTP
+# FTP
 
 FTP is the File Transfer Protocol. Rclone FTP support is provided using the
 [github.com/jlaffaye/ftp](https://godoc.org/github.com/jlaffaye/ftp)
@@ -19,15 +20,16 @@ a `/` it is relative to the home directory of the user.  An empty path
 
 To create an FTP configuration named `remote`, run
 
-    rclone config
+```console
+rclone config
+```
 
 Rclone config guides you through an interactive setup process. A minimal
 rclone FTP remote definition only requires host, username and password.
-For an anonymous FTP server, use `anonymous` as username and your email
-address as password.
+For an anonymous FTP server, see [below](#anonymous-ftp).
 
-```
-No remotes found, make a new one?
+```text
+No remotes found, make a new one\?
 n) New remote
 r) Rename remote
 c) Copy remote
@@ -39,7 +41,7 @@ Type of storage to configure.
 Enter a string value. Press Enter for the default ("").
 Choose a number from below, or type in your own value
 [snip]
-XX / FTP Connection
+XX / FTP
    \ "ftp"
 [snip]
 Storage> ftp
@@ -72,12 +74,12 @@ Use FTP over TLS (Explicit)
 Enter a boolean value (true or false). Press Enter for the default ("false").
 explicit_tls> 
 Remote config
---------------------
-[remote]
-type = ftp
-host = ftp.example.com
-pass = *** ENCRYPTED ***
---------------------
+Configuration complete.
+Options:
+- type: ftp
+- host: ftp.example.com
+- pass: *** ENCRYPTED ***
+Keep this "remote" remote?
 y) Yes this is OK
 e) Edit this remote
 d) Delete this remote
@@ -86,38 +88,101 @@ y/e/d> y
 
 To see all directories in the home directory of `remote`
 
-    rclone lsd remote:
+```console
+rclone lsd remote:
+```
 
 Make a new directory
 
-    rclone mkdir remote:path/to/directory
+```console
+rclone mkdir remote:path/to/directory
+```
 
 List the contents of a directory
 
-    rclone ls remote:path/to/directory
+```console
+rclone ls remote:path/to/directory
+```
 
 Sync `/home/local/directory` to the remote directory, deleting any
 excess files in the directory.
 
-    rclone sync -i /home/local/directory remote:directory
+```console
+rclone sync --interactive /home/local/directory remote:directory
+```
 
-### Example without a config file ###
+### Anonymous FTP
 
-    rclone lsf :ftp: --ftp-host=speedtest.tele2.net --ftp-user=anonymous --ftp-pass=`rclone obscure dummy`
+When connecting to a FTP server that allows anonymous login, you can use the
+special "anonymous" username. Traditionally, this user account accepts any
+string as a password, although it is common to use either the password
+"anonymous" or "guest". Some servers require the use of a valid e-mail
+address as password.
 
-### Implicit TLS ###
+Using [on-the-fly](#backend-path-to-dir) or
+[connection string](/docs/#connection-strings) remotes makes it easy to access
+such servers, without requiring any configuration in advance. The following
+are examples of that:
+
+```console
+rclone lsf :ftp: --ftp-host=speedtest.tele2.net --ftp-user=anonymous --ftp-pass=$(rclone obscure dummy)
+rclone lsf :ftp,host=speedtest.tele2.net,user=anonymous,pass=$(rclone obscure dummy):
+```
+
+The above examples work in Linux shells and in PowerShell, but not Windows
+Command Prompt. They execute the [rclone obscure](/commands/rclone_obscure/)
+command to create a password string in the format required by the
+[pass](#ftp-pass) option. The following examples are exactly the same, except use
+an already obscured string representation of the same password "dummy", and
+therefore works even in Windows Command Prompt:
+
+```console
+rclone lsf :ftp: --ftp-host=speedtest.tele2.net --ftp-user=anonymous --ftp-pass=IXs2wc8OJOz7SYLBk47Ji1rHTmxM
+rclone lsf :ftp,host=speedtest.tele2.net,user=anonymous,pass=IXs2wc8OJOz7SYLBk47Ji1rHTmxM:
+```
+
+### Implicit TLS
 
 Rlone FTP supports implicit FTP over TLS servers (FTPS). This has to
 be enabled in the FTP backend config for the remote, or with
 [`--ftp-tls`](#ftp-tls). The default FTPS port is `990`, not `21` and
 can be set with [`--ftp-port`](#ftp-port).
 
+## TLS Options
+
+TLS options for Implicit and Explicit TLS can be set using the
+following flags which are specific to the FTP backend:
+
+```text
+--ftp-no-check-certificate     Do not verify the TLS certificate of the server
+--ftp-disable-tls13            Disable TLS 1.3 (workaround for FTP servers with buggy TLS)
+--ftp-tls-cache-size int       Size of TLS session cache for all control and data connections (default 32)
+```
+
+However any of the global TLS flags can also be used such as:
+
+```text
+--ca-cert stringArray          CA certificate used to verify servers
+--client-cert string           Client SSL certificate (PEM) for mutual TLS auth
+--client-key string            Client SSL private key (PEM) for mutual TLS auth
+--no-check-certificate         Do not verify the server SSL certificate (insecure)
+```
+
+If these need to be put in the config file so they apply to just the
+FTP backend then use the `override` syntax, eg
+
+```text
+override.ca_cert = XXX
+override.client_cert = XXX
+override.client_key = XXX
+```
+
 ### Restricted filename characters
 
 In addition to the [default restricted characters set](/overview/#restricted-characters)
 the following characters are also replaced:
 
-File names cannot end with the following characters. Repacement is
+File names cannot end with the following characters. Replacement is
 limited to the last character in a file name:
 
 | Character | Value | Replacement |
@@ -135,10 +200,10 @@ This backend's interactive configuration wizard provides a selection of
 sensible encoding settings for major FTP servers: ProFTPd, PureFTPd, VsFTPd.
 Just hit a selection number when prompted.
 
-{{< rem autogenerated options start" - DO NOT EDIT - instead edit fs.RegInfo in backend/ftp/ftp.go then run make backenddocs" >}}
+<!-- autogenerated options start - DO NOT EDIT - instead edit fs.RegInfo in backend/ftp/ftp.go and run make backenddocs to verify --> <!-- markdownlint-disable-line line-length -->
 ### Standard options
 
-Here are the standard options specific to ftp (FTP Connection).
+Here are the Standard options specific to ftp (FTP).
 
 #### --ftp-host
 
@@ -195,7 +260,7 @@ Use Implicit FTPS (FTP over TLS).
 When using implicit FTP over TLS the client connects using TLS
 right from the start which breaks compatibility with
 non-TLS-aware servers. This is usually served over port 990 rather
-than port 21. Cannot be used in combination with explicit FTP.
+than port 21. Cannot be used in combination with explicit FTPS.
 
 Properties:
 
@@ -210,7 +275,7 @@ Use Explicit FTPS (FTP over TLS).
 
 When using explicit FTP over TLS the client explicitly requests
 security from the server in order to upgrade a plain text connection
-to an encrypted one. Cannot be used in combination with implicit FTP.
+to an encrypted one. Cannot be used in combination with implicit FTPS.
 
 Properties:
 
@@ -221,11 +286,25 @@ Properties:
 
 ### Advanced options
 
-Here are the advanced options specific to ftp (FTP Connection).
+Here are the Advanced options specific to ftp (FTP).
 
 #### --ftp-concurrency
 
 Maximum number of FTP simultaneous connections, 0 for unlimited.
+
+Note that setting this is very likely to cause deadlocks so it should
+be used with care.
+
+If you are doing a sync or copy then make sure concurrency is one more
+than the sum of `--transfers` and `--checkers`.
+
+If you use `--check-first` then it just needs to be one more than the
+maximum of `--checkers` and `--transfers`.
+
+So for `concurrency 3` you'd use `--checkers 2 --transfers 2
+--check-first` or `--checkers 1 --transfers 1`.
+
+
 
 Properties:
 
@@ -289,6 +368,17 @@ Properties:
 - Type:        bool
 - Default:     false
 
+#### --ftp-force-list-hidden
+
+Use LIST -a to force listing of hidden files and folders. This will disable the use of MLSD.
+
+Properties:
+
+- Config:      force_list_hidden
+- Env Var:     RCLONE_FTP_FORCE_LIST_HIDDEN
+- Type:        bool
+- Default:     false
+
 #### --ftp-idle-timeout
 
 Max time before closing idle connections.
@@ -343,6 +433,22 @@ Properties:
 - Type:        bool
 - Default:     false
 
+#### --ftp-allow-insecure-tls-ciphers
+
+Allow insecure TLS ciphers
+
+Setting this flag will allow the usage of the following TLS ciphers in addition to the secure defaults:
+
+- TLS_RSA_WITH_AES_128_GCM_SHA256
+
+
+Properties:
+
+- Config:      allow_insecure_tls_ciphers
+- Env Var:     RCLONE_FTP_ALLOW_INSECURE_TLS_CIPHERS
+- Type:        bool
+- Default:     false
+
 #### --ftp-shut-timeout
 
 Maximum time to wait for data connection closing status.
@@ -368,6 +474,66 @@ Properties:
 - Type:        bool
 - Default:     false
 
+#### --ftp-socks-proxy
+
+Socks 5 proxy host.
+		
+Supports the format user:pass@host:port, user@host:port, host:port.
+		
+Example:
+		
+    myUser:myPass@localhost:9005
+
+
+Properties:
+
+- Config:      socks_proxy
+- Env Var:     RCLONE_FTP_SOCKS_PROXY
+- Type:        string
+- Required:    false
+
+#### --ftp-http-proxy
+
+URL for HTTP CONNECT proxy
+
+Set this to a URL for an HTTP proxy which supports the HTTP CONNECT verb.
+
+Supports the format http://user:pass@host:port, http://host:port, http://host.
+
+Example:
+
+    http://myUser:myPass@proxyhostname.example.com:8000
+
+
+Properties:
+
+- Config:      http_proxy
+- Env Var:     RCLONE_FTP_HTTP_PROXY
+- Type:        string
+- Required:    false
+
+#### --ftp-no-check-upload
+
+Don't check the upload is OK
+
+Normally rclone will try to check the upload exists after it has
+uploaded a file to make sure the size and modification time are as
+expected.
+
+This flag stops rclone doing these checks. This enables uploading to
+folders which are write only.
+
+You will likely need to use the --inplace flag also if uploading to
+a write only folder.
+
+
+Properties:
+
+- Config:      no_check_upload
+- Env Var:     RCLONE_FTP_NO_CHECK_UPLOAD
+- Type:        bool
+- Default:     false
+
 #### --ftp-encoding
 
 The encoding for the backend.
@@ -378,17 +544,28 @@ Properties:
 
 - Config:      encoding
 - Env Var:     RCLONE_FTP_ENCODING
-- Type:        MultiEncoder
+- Type:        Encoding
 - Default:     Slash,Del,Ctl,RightSpace,Dot
 - Examples:
-    - "Asterisk,Ctl,Dot,Slash"
-        - ProFTPd can't handle '*' in file names
-    - "BackSlash,Ctl,Del,Dot,RightSpace,Slash,SquareBracket"
-        - PureFTPd can't handle '[]' or '*' in file names
-    - "Ctl,LeftPeriod,Slash"
-        - VsFTPd can't handle file names starting with dot
+  - "Asterisk,Ctl,Dot,Slash"
+    - ProFTPd can't handle '*' in file names
+  - "BackSlash,Ctl,Del,Dot,RightSpace,Slash,SquareBracket"
+    - PureFTPd can't handle '[]' or '*' in file names
+  - "Ctl,LeftPeriod,Slash"
+    - VsFTPd can't handle file names starting with dot
 
-{{< rem autogenerated options stop >}}
+#### --ftp-description
+
+Description of the remote.
+
+Properties:
+
+- Config:      description
+- Env Var:     RCLONE_FTP_DESCRIPTION
+- Type:        string
+- Required:    false
+
+<!-- autogenerated options stop -->
 
 ## Limitations
 
@@ -406,7 +583,8 @@ this capability cannot determine free space for an rclone mount or
 use policy `mfs` (most free space) as a member of an rclone union
 remote.
 
-See [List of backends that do not support rclone about](https://rclone.org/overview/#optional-features) and [rclone about](https://rclone.org/commands/rclone_about/)
+See [List of backends that do not support rclone about](https://rclone.org/overview/#optional-features)
+and [rclone about](https://rclone.org/commands/rclone_about/).
 
 The implementation of : `--dump headers`,
 `--dump bodies`, `--dump auth` for debugging isn't the same as
@@ -421,7 +599,7 @@ at present.
 
 The `ftp_proxy` environment variable is not currently supported.
 
-#### Modified time
+### Modification times
 
 File modification time (timestamps) is supported to 1 second resolution
 for major FTP servers: ProFTPd, PureFTPd, VsFTPd, and FileZilla FTP server.

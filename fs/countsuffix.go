@@ -81,13 +81,7 @@ func (x CountSuffix) Unit(unit string) string {
 	if val == "off" {
 		return val
 	}
-	var suffixUnit string
-	if suffix != "" && unit != "" {
-		suffixUnit = suffix + unit
-	} else {
-		suffixUnit = suffix + unit
-	}
-	return val + " " + suffixUnit
+	return val + " " + suffix + unit
 }
 
 func (x *CountSuffix) multiplierFromSymbol(s byte) (found bool, multiplier float64) {
@@ -154,7 +148,7 @@ func (x *CountSuffix) Set(s string) error {
 }
 
 // Type of the value
-func (x *CountSuffix) Type() string {
+func (x CountSuffix) Type() string {
 	return "CountSuffix"
 }
 

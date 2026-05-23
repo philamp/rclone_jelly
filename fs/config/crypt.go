@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"strings"
@@ -42,11 +41,17 @@ var (
 	PassConfigKeyForDaemonization = false
 )
 
+// IsEncrypted returns true if the config file is encrypted
+func IsEncrypted() bool {
+	return len(configKey) > 0
+}
+
 // Decrypt will automatically decrypt a reader
 func Decrypt(b io.ReadSeeker) (io.Reader, error) {
 	ctx := context.Background()
 	ci := fs.GetConfig(ctx)
 	var usingPasswordCommand bool
+	var usingEnvPassword bool
 
 	// Find first non-empty line
 	r := bufio.NewReader(b)
@@ -72,75 +77,61 @@ func Decrypt(b io.ReadSeeker) (io.Reader, error) {
 		if strings.HasPrefix(l, "RCLONE_ENCRYPT_V") {
 			return nil, errors.New("unsupported configuration encryption - update rclone for support")
 		}
+		// Restore non-seekable plain-text stream to its original state
 		if _, err := b.Seek(0, io.SeekStart); err != nil {
-			return nil, err
+			return io.MultiReader(strings.NewReader(l+"\n"), r), nil
 		}
 		return b, nil
 	}
 
 	if len(configKey) == 0 {
-		if len(ci.PasswordCommand) != 0 {
-			var stdout bytes.Buffer
-			var stderr bytes.Buffer
-
-			cmd := exec.Command(ci.PasswordCommand[0], ci.PasswordCommand[1:]...)
-
-			cmd.Stdout = &stdout
-			cmd.Stderr = &stderr
-			cmd.Stdin = os.Stdin
-
-			if err := cmd.Run(); err != nil {
-				// One does not always get the stderr returned in the wrapped error.
-				fs.Errorf(nil, "Using --password-command returned: %v", err)
-				if ers := strings.TrimSpace(stderr.String()); ers != "" {
-					fs.Errorf(nil, "--password-command stderr: %s", ers)
-				}
-				return nil, fmt.Errorf("password command failed: %w", err)
+		pass, err := GetPasswordCommand(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if pass != "" {
+			usingPasswordCommand = true
+			err = SetConfigPassword(pass)
+			if err != nil {
+				return nil, fmt.Errorf("incorrect password: %w", err)
 			}
-			if pass := strings.Trim(stdout.String(), "\r\n"); pass != "" {
-				err := SetConfigPassword(pass)
-				if err != nil {
-					return nil, fmt.Errorf("incorrect password: %w", err)
-				}
-			} else {
-				return nil, errors.New("password-command returned empty string")
-			}
-
 			if len(configKey) == 0 {
 				return nil, errors.New("unable to decrypt configuration: incorrect password")
 			}
-			usingPasswordCommand = true
 		} else {
 			usingPasswordCommand = false
 
-			envpw := os.Getenv("RCLONE_CONFIG_PASS")
+			envPassword := os.Getenv("RCLONE_CONFIG_PASS")
 
-			if envpw != "" {
-				err := SetConfigPassword(envpw)
+			if envPassword != "" {
+				usingEnvPassword = true
+				err := SetConfigPassword(envPassword)
 				if err != nil {
 					fs.Errorf(nil, "Using RCLONE_CONFIG_PASS returned: %v", err)
 				} else {
 					fs.Debugf(nil, "Using RCLONE_CONFIG_PASS password.")
 				}
+			} else {
+				usingEnvPassword = false
 			}
 		}
 	}
 
 	// Encrypted content is base64 encoded.
 	dec := base64.NewDecoder(base64.StdEncoding, r)
-	box, err := ioutil.ReadAll(dec)
+	box, err := io.ReadAll(dec)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load base64 encoded data: %w", err)
 	}
 	if len(box) < 24+secretbox.Overhead {
-		return nil, errors.New("Configuration data too short")
+		return nil, errors.New("configuration data too short")
 	}
 
 	var out []byte
 	for {
 		if envKeyFile := os.Getenv("_RCLONE_CONFIG_KEY_FILE"); len(envKeyFile) > 0 {
 			fs.Debugf(nil, "attempting to obtain configKey from temp file %s", envKeyFile)
-			obscuredKey, err := ioutil.ReadFile(envKeyFile)
+			obscuredKey, err := os.ReadFile(envKeyFile)
 			if err != nil {
 				errRemove := os.Remove(envKeyFile)
 				if errRemove != nil {
@@ -154,16 +145,17 @@ func Decrypt(b io.ReadSeeker) (io.Reader, error) {
 			}
 			configKey = []byte(obscure.MustReveal(string(obscuredKey)))
 			fs.Debugf(nil, "using _RCLONE_CONFIG_KEY_FILE for configKey")
-		} else {
-			if len(configKey) == 0 {
-				if usingPasswordCommand {
-					return nil, errors.New("using --password-command derived password, unable to decrypt configuration")
-				}
-				if !ci.AskPassword {
-					return nil, errors.New("unable to decrypt configuration and not allowed to ask for password - set RCLONE_CONFIG_PASS to your configuration password")
-				}
-				getConfigPassword("Enter configuration password:")
+		} else if len(configKey) == 0 {
+			if usingPasswordCommand {
+				return nil, errors.New("using --password-command derived password, unable to decrypt configuration")
 			}
+			if usingEnvPassword {
+				return nil, errors.New("using RCLONE_CONFIG_PASS env password, unable to decrypt configuration")
+			}
+			if !ci.AskPassword {
+				return nil, errors.New("unable to decrypt configuration and not allowed to ask for password - set RCLONE_CONFIG_PASS to your configuration password")
+			}
+			getConfigPassword("Enter configuration password:")
 		}
 
 		// Nonce is first 24 bytes of the ciphertext
@@ -186,6 +178,40 @@ func Decrypt(b io.ReadSeeker) (io.Reader, error) {
 	return bytes.NewReader(out), nil
 }
 
+// GetPasswordCommand gets the password using the --password-command setting
+//
+// If the --password-command flag was not in use it returns "", nil
+func GetPasswordCommand(ctx context.Context) (pass string, err error) {
+	ci := fs.GetConfig(ctx)
+	if len(ci.PasswordCommand) == 0 {
+		return "", nil
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	cmd := exec.Command(ci.PasswordCommand[0], ci.PasswordCommand[1:]...)
+
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.Stdin = os.Stdin
+
+	err = cmd.Run()
+	if err != nil {
+		// One does not always get the stderr returned in the wrapped error.
+		fs.Errorf(nil, "Using --password-command returned: %v", err)
+		if ers := strings.TrimSpace(stderr.String()); ers != "" {
+			fs.Errorf(nil, "--password-command stderr: %s", ers)
+		}
+		return pass, fmt.Errorf("password command failed: %w", err)
+	}
+	pass = strings.Trim(stdout.String(), "\r\n")
+	if pass == "" {
+		return pass, errors.New("--password-command returned empty string")
+	}
+	return pass, nil
+}
+
 // Encrypt the config file
 func Encrypt(src io.Reader, dst io.Writer) error {
 	if len(configKey) == 0 {
@@ -206,20 +232,20 @@ func Encrypt(src io.Reader, dst io.Writer) error {
 	enc := base64.NewEncoder(base64.StdEncoding, dst)
 	_, err := enc.Write(nonce[:])
 	if err != nil {
-		return fmt.Errorf("Failed to write config file: %v", err)
+		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
 	var key [32]byte
 	copy(key[:], configKey[:32])
 
-	data, err := ioutil.ReadAll(src)
+	data, err := io.ReadAll(src)
 	if err != nil {
 		return err
 	}
 	b := secretbox.Seal(nil, data, &nonce, &key)
 	_, err = enc.Write(b)
 	if err != nil {
-		return fmt.Errorf("Failed to write config file: %v", err)
+		return fmt.Errorf("failed to write config file: %w", err)
 	}
 	return enc.Close()
 }
@@ -256,7 +282,7 @@ func SetConfigPassword(password string) error {
 	}
 	configKey = sha.Sum(nil)
 	if PassConfigKeyForDaemonization {
-		tempFile, err := ioutil.TempFile("", "rclone")
+		tempFile, err := os.CreateTemp("", "rclone")
 		if err != nil {
 			return fmt.Errorf("cannot create temp file to store configKey: %w", err)
 		}
@@ -297,10 +323,46 @@ func ClearConfigPassword() {
 // changeConfigPassword will query the user twice
 // for a password. If the same password is entered
 // twice the key is updated.
+//
+// This will use --password-command if configured to read the password.
 func changeConfigPassword() {
-	err := SetConfigPassword(ChangePassword("NEW configuration"))
+	// Set RCLONE_PASSWORD_CHANGE to "1" when calling the --password-command tool
+	_ = os.Setenv("RCLONE_PASSWORD_CHANGE", "1")
+	defer func() {
+		_ = os.Unsetenv("RCLONE_PASSWORD_CHANGE")
+	}()
+	pass, err := GetPasswordCommand(context.Background())
+	if err != nil {
+		fmt.Printf("Failed to read new password with --password-command: %v\n", err)
+		return
+	}
+	if pass == "" {
+		pass = ChangePassword("NEW configuration")
+	} else {
+		fmt.Printf("Read password using --password-command\n")
+	}
+	err = SetConfigPassword(pass)
 	if err != nil {
 		fmt.Printf("Failed to set config password: %v\n", err)
 		return
 	}
+}
+
+// ChangeConfigPasswordAndSave will query the user twice
+// for a password. If the same password is entered
+// twice the key is updated.
+//
+// This will use --password-command if configured to read the password.
+//
+// It will then save the config
+func ChangeConfigPasswordAndSave() {
+	changeConfigPassword()
+	SaveConfig()
+}
+
+// RemoveConfigPasswordAndSave will clear the config password and save
+// the unencrypted config file.
+func RemoveConfigPasswordAndSave() {
+	configKey = nil
+	SaveConfig()
 }

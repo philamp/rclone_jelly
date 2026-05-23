@@ -1,3 +1,4 @@
+// Package api provides types used by the Mail.ru API.
 package api
 
 import (
@@ -62,8 +63,8 @@ type UserInfoResponse struct {
 				Prolong      bool   `json:"prolong"`
 				Promocodes   struct {
 				} `json:"promocodes"`
-				Subscription []interface{} `json:"subscription"`
-				Version      string        `json:"version"`
+				Subscription []any  `json:"subscription"`
+				Version      string `json:"version"`
 			} `json:"billing"`
 			Bonuses struct {
 				CameraUpload bool `json:"camera_upload"`
@@ -111,7 +112,7 @@ type ListItem struct {
 	Count struct {
 		Folders int `json:"folders"`
 		Files   int `json:"files"`
-	} `json:"count,omitempty"`
+	} `json:"count"`
 	Kind      string `json:"kind"`
 	Type      string `json:"type"`
 	Name      string `json:"name"`
@@ -153,7 +154,7 @@ type FolderInfoResponse struct {
 		Type string     `json:"type"`
 		Home string     `json:"home"`
 		List []ListItem `json:"list"`
-	} `json:"body,omitempty"`
+	} `json:"body"`
 	Time   int64  `json:"time"`
 	Status int    `json:"status"`
 	Email  string `json:"email"`

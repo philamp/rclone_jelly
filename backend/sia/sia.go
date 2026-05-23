@@ -1,3 +1,4 @@
+// Package sia provides an interface to the Sia storage system.
 package sia
 
 import (
@@ -44,7 +45,8 @@ func init() {
 
 Note that siad must run with --disable-api-security to open API port for other hosts (not recommended).
 Keep default if Sia daemon runs on localhost.`,
-			Default: "http://127.0.0.1:9980",
+			Default:   "http://127.0.0.1:9980",
+			Sensitive: true,
 		}, {
 			Name: "api_password",
 			Help: `Sia Daemon API Password.
@@ -335,7 +337,7 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	}
 
 	// Cleanup stray files left after failed upload
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		cleanObj, cleanErr := f.NewObject(ctx, src.Remote())
 		if cleanErr == nil {
 			cleanErr = cleanObj.Remove(ctx)
@@ -423,9 +425,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		return nil, err
 	}
 
-	if strings.HasSuffix(opt.APIURL, "/") {
-		opt.APIURL = strings.TrimSuffix(opt.APIURL, "/")
-	}
+	opt.APIURL = strings.TrimSuffix(opt.APIURL, "/")
 
 	// Parse the endpoint
 	u, err := url.Parse(opt.APIURL)

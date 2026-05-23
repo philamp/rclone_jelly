@@ -1,6 +1,6 @@
 //go:build !plan9 && !js
-// +build !plan9,!js
 
+// Package kv provides key/value database.
 package kv
 
 import (
@@ -79,7 +79,7 @@ func Start(ctx context.Context, facility string, f fs.Fs) (*DB, error) {
 	}
 
 	name := makeName(facility, f)
-	lockTime := fs.GetConfig(ctx).KvLockTime
+	lockTime := time.Duration(fs.GetConfig(ctx).KvLockTime)
 
 	db := &DB{
 		name:      name,
@@ -215,7 +215,7 @@ func (db *DB) loop() {
 
 // Do a key-value operation and return error when done
 func (db *DB) Do(write bool, op Op) error {
-	if db.queue == nil {
+	if db == nil || db.queue == nil {
 		return ErrInactive
 	}
 	r := &request{
@@ -290,6 +290,11 @@ func (b *bucketAdapter) Cursor() Cursor {
 // Stop a database loop, optionally removing the file
 func (db *DB) Stop(remove bool) error {
 	return db.Do(false, &opStop{remove: remove})
+}
+
+// IsStopped returns true if db is already stopped
+func (db *DB) IsStopped() bool {
+	return len(dbMap) == 0
 }
 
 // opStop: close database and stop operation loop

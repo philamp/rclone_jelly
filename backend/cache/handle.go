@@ -1,5 +1,4 @@
 //go:build !plan9 && !js
-// +build !plan9,!js
 
 package cache
 
@@ -119,7 +118,7 @@ func (r *Handle) startReadWorkers() {
 	r.scaleWorkers(totalWorkers)
 }
 
-// scaleOutWorkers will increase the worker pool count by the provided amount
+// scaleWorkers will increase the worker pool count by the provided amount
 func (r *Handle) scaleWorkers(desired int) {
 	current := r.workers
 	if current == desired {
@@ -183,7 +182,7 @@ func (r *Handle) queueOffset(offset int64) {
 			}
 		}
 
-		for i := 0; i < r.workers; i++ {
+		for i := range r.workers {
 			o := r.preloadOffset + int64(r.cacheFs().opt.ChunkSize)*int64(i)
 			if o < 0 || o >= r.cachedObject.Size() {
 				continue
@@ -209,7 +208,7 @@ func (r *Handle) getChunk(chunkStart int64) ([]byte, error) {
 	offset := chunkStart % int64(r.cacheFs().opt.ChunkSize)
 
 	// we align the start offset of the first chunk to a likely chunk in the storage
-	chunkStart = chunkStart - offset
+	chunkStart -= offset
 	r.queueOffset(chunkStart)
 	found := false
 
@@ -223,7 +222,7 @@ func (r *Handle) getChunk(chunkStart int64) ([]byte, error) {
 	if !found {
 		// we're gonna give the workers a chance to pickup the chunk
 		// and retry a couple of times
-		for i := 0; i < r.cacheFs().opt.ReadRetries*8; i++ {
+		for i := range r.cacheFs().opt.ReadRetries * 8 {
 			data, err = r.storage().GetChunk(r.cachedObject, chunkStart)
 			if err == nil {
 				found = true
@@ -328,7 +327,7 @@ func (r *Handle) Seek(offset int64, whence int) (int64, error) {
 
 	chunkStart := r.offset - (r.offset % int64(r.cacheFs().opt.ChunkSize))
 	if chunkStart >= int64(r.cacheFs().opt.ChunkSize) {
-		chunkStart = chunkStart - int64(r.cacheFs().opt.ChunkSize)
+		chunkStart -= int64(r.cacheFs().opt.ChunkSize)
 	}
 	r.queueOffset(chunkStart)
 
@@ -416,10 +415,8 @@ func (w *worker) run() {
 					continue
 				}
 			}
-		} else {
-			if w.r.storage().HasChunk(w.r.cachedObject, chunkStart) {
-				continue
-			}
+		} else if w.r.storage().HasChunk(w.r.cachedObject, chunkStart) {
+			continue
 		}
 
 		chunkEnd := chunkStart + int64(w.r.cacheFs().opt.ChunkSize)

@@ -1,16 +1,16 @@
-// Daemonization interface for Unix platforms (implementation)
+//go:build unix && !aix
 
-//go:build !windows && !plan9 && !js
-// +build !windows,!plan9,!js
-
+// Package daemonize provides daemonization interface for Unix platforms.
 package daemonize
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"syscall"
 
 	"github.com/rclone/rclone/fs"
+	"golang.org/x/sys/unix"
 )
 
 // StartDaemon runs background twin of current process.
@@ -87,9 +87,10 @@ func argsToEnv(origArgs, origEnv []string) (args, env []string) {
 		}
 
 		arg = arg[2:]
-		key, val := arg, "true"
-		if idx := strings.Index(arg, "="); idx != -1 {
-			key, val = arg[:idx], arg[idx+1:]
+		var key, val string
+		var ok bool
+		if key, val, ok = strings.Cut(arg, "="); !ok {
+			val = "true"
 		}
 
 		name := "RCLONE_" + strings.ToUpper(strings.ReplaceAll(key, "-", "_"))
@@ -108,4 +109,21 @@ func argsToEnv(origArgs, origEnv []string) (args, env []string) {
 		}
 	}
 	return
+}
+
+// Check returns non nil if the daemon process has died
+func Check(daemon *os.Process) error {
+	var status unix.WaitStatus
+	wpid, err := unix.Wait4(daemon.Pid, &status, unix.WNOHANG, nil)
+	// fs.Debugf(nil, "wait4 returned wpid=%d, err=%v, status=%d", wpid, err, status)
+	if err != nil {
+		return err
+	}
+	if wpid == 0 {
+		return nil
+	}
+	if status.Exited() {
+		return fmt.Errorf("daemon exited with error code %d", status.ExitStatus())
+	}
+	return nil
 }

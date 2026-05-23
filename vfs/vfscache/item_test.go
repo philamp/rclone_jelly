@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"sync"
@@ -24,14 +23,17 @@ import (
 
 var zeroes = string(make([]byte, 100))
 
-func newItemTestCache(t *testing.T) (r *fstest.Run, c *Cache, cleanup func()) {
-	opt := vfscommon.DefaultOpt
+func newItemTestCache(t *testing.T) (r *fstest.Run, c *Cache) {
+	opt := vfscommon.Opt
 
 	// Disable the cache cleaner as it interferes with these tests
 	opt.CachePollInterval = 0
 
 	// Disable synchronous write
 	opt.WriteBack = 0
+
+	// Disable handle caching so existing tests get immediate close behavior
+	opt.HandleCaching = 0
 
 	return newTestCacheOpt(t, opt)
 }
@@ -42,7 +44,7 @@ func checkObject(t *testing.T, r *fstest.Run, remote string, contents string) {
 	require.NoError(t, err)
 	in, err := obj.Open(context.Background())
 	require.NoError(t, err)
-	buf, err := ioutil.ReadAll(in)
+	buf, err := io.ReadAll(in)
 	require.NoError(t, err)
 	require.NoError(t, in.Close())
 	assert.Equal(t, contents, string(buf))
@@ -62,8 +64,7 @@ func newFile(t *testing.T, r *fstest.Run, c *Cache, remote string) (contents str
 }
 
 func TestItemExists(t *testing.T) {
-	_, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	_, c := newItemTestCache(t)
 	item, _ := c.get("potato")
 
 	assert.False(t, item.Exists())
@@ -76,8 +77,7 @@ func TestItemExists(t *testing.T) {
 }
 
 func TestItemGetSize(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 	item, _ := c.get("potato")
 	require.NoError(t, item.Open(nil))
 
@@ -98,8 +98,7 @@ func TestItemGetSize(t *testing.T) {
 }
 
 func TestItemDirty(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 	item, _ := c.get("potato")
 	require.NoError(t, item.Open(nil))
 
@@ -123,8 +122,7 @@ func TestItemDirty(t *testing.T) {
 }
 
 func TestItemSync(t *testing.T) {
-	_, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	_, c := newItemTestCache(t)
 	item, _ := c.get("potato")
 
 	require.Error(t, item.Sync())
@@ -137,8 +135,7 @@ func TestItemSync(t *testing.T) {
 }
 
 func TestItemTruncateNew(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 	item, _ := c.get("potato")
 
 	require.Error(t, item.Truncate(0))
@@ -165,8 +162,7 @@ func TestItemTruncateNew(t *testing.T) {
 }
 
 func TestItemTruncateExisting(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 
 	contents, obj, item := newFile(t, r, c, "existing")
 
@@ -185,8 +181,7 @@ func TestItemTruncateExisting(t *testing.T) {
 }
 
 func TestItemReadAt(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 
 	contents, obj, item := newFile(t, r, c, "existing")
 	buf := make([]byte, 10)
@@ -220,8 +215,7 @@ func TestItemReadAt(t *testing.T) {
 }
 
 func TestItemWriteAtNew(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 	item, _ := c.get("potato")
 	buf := make([]byte, 10)
 
@@ -252,8 +246,7 @@ func TestItemWriteAtNew(t *testing.T) {
 }
 
 func TestItemWriteAtExisting(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 
 	contents, obj, item := newFile(t, r, c, "existing")
 
@@ -277,8 +270,7 @@ func TestItemWriteAtExisting(t *testing.T) {
 }
 
 func TestItemLoadMeta(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 
 	contents, obj, item := newFile(t, r, c, "existing")
 	_ = contents
@@ -306,8 +298,7 @@ func TestItemLoadMeta(t *testing.T) {
 }
 
 func TestItemReload(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 
 	contents, obj, item := newFile(t, r, c, "existing")
 	_ = contents
@@ -351,8 +342,7 @@ func TestItemReload(t *testing.T) {
 }
 
 func TestItemReloadRemoteGone(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 
 	contents, obj, item := newFile(t, r, c, "existing")
 	_ = contents
@@ -395,8 +385,7 @@ func TestItemReloadRemoteGone(t *testing.T) {
 }
 
 func TestItemReloadCacheStale(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 
 	contents, obj, item := newFile(t, r, c, "existing")
 
@@ -423,7 +412,13 @@ func TestItemReloadCacheStale(t *testing.T) {
 	assert.NotEqual(t, contents, contents2)
 
 	// Re-open with updated object
+	oldFingerprint := item.info.Fingerprint
+	assert.NotEqual(t, "", oldFingerprint)
 	require.NoError(t, item.Open(obj))
+
+	// Make sure fingerprint was updated
+	assert.NotEqual(t, oldFingerprint, item.info.Fingerprint)
+	assert.NotEqual(t, "", item.info.Fingerprint)
 
 	// Check size is now 110
 	size, err = item.GetSize()
@@ -436,7 +431,7 @@ func TestItemReloadCacheStale(t *testing.T) {
 	assert.Equal(t, int64(110), fi.Size())
 
 	// Write to the file to make it dirty
-	// This checks we aren't re-using stale data
+	// This checks we aren't reusing stale data
 	n, err := item.WriteAt([]byte("HELLO"), 0)
 	require.NoError(t, err)
 	assert.Equal(t, 5, n)
@@ -451,8 +446,7 @@ func TestItemReloadCacheStale(t *testing.T) {
 }
 
 func TestItemReadWrite(t *testing.T) {
-	r, c, cleanup := newItemTestCache(t)
-	defer cleanup()
+	r, c := newItemTestCache(t)
 	const (
 		size     = 50*1024*1024 + 123
 		fileName = "large"
@@ -538,10 +532,7 @@ func TestItemReadWrite(t *testing.T) {
 		assert.False(t, item.present())
 		for !item.present() {
 			blockSize := rand.Intn(len(buf))
-			offset := rand.Int63n(size+2*int64(blockSize)) - int64(blockSize)
-			if offset < 0 {
-				offset = 0
-			}
+			offset := max(rand.Int63n(size+2*int64(blockSize))-int64(blockSize), 0)
 			_, _ = readCheck(t, item, offset, blockSize)
 		}
 		require.NoError(t, item.Close(nil))
@@ -553,22 +544,17 @@ func TestItemReadWrite(t *testing.T) {
 		require.NoError(t, item.Open(obj))
 		assert.False(t, item.present())
 		var wg sync.WaitGroup
-		for i := 0; i < 8; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range 8 {
+			wg.Go(func() {
 				in := readers.NewPatternReader(size)
 				buf := make([]byte, 1024*1024)
 				buf2 := make([]byte, 1024*1024)
 				for !item.present() {
 					blockSize := rand.Intn(len(buf))
-					offset := rand.Int63n(size+2*int64(blockSize)) - int64(blockSize)
-					if offset < 0 {
-						offset = 0
-					}
+					offset := max(rand.Int63n(size+2*int64(blockSize))-int64(blockSize), 0)
 					_, _ = readCheckBuf(t, in, buf, buf2, item, offset, blockSize)
 				}
-			}()
+			})
 		}
 		wg.Wait()
 		require.NoError(t, item.Close(nil))
@@ -596,4 +582,120 @@ func TestItemReadWrite(t *testing.T) {
 		require.NoError(t, item.Close(nil))
 		assert.False(t, item.remove(fileName))
 	})
+}
+
+func newItemTestCacheHandleCaching(t *testing.T, handleCaching time.Duration) (r *fstest.Run, c *Cache) {
+	opt := vfscommon.Opt
+
+	// Disable the cache cleaner as it interferes with these tests
+	opt.CachePollInterval = 0
+
+	// Disable synchronous write
+	opt.WriteBack = 0
+
+	// Set handle caching grace period
+	opt.HandleCaching = fs.Duration(handleCaching)
+
+	return newTestCacheOpt(t, opt)
+}
+
+func TestItemHandleCaching(t *testing.T) {
+	r, c := newItemTestCacheHandleCaching(t, 1*time.Second)
+
+	contents, obj, item := newFile(t, r, c, "existing")
+
+	// Open, read, and close the item
+	require.NoError(t, item.Open(obj))
+
+	buf := make([]byte, 10)
+	n, err := item.ReadAt(buf, 0)
+	assert.Equal(t, 10, n)
+	require.NoError(t, err)
+	assert.Equal(t, contents[:10], string(buf[:n]))
+
+	require.NoError(t, item.Close(nil))
+
+	// After close, grace period should keep fd and downloaders alive
+	item.mu.Lock()
+	assert.NotNil(t, item.fd, "fd should still be open during grace period")
+	assert.NotNil(t, item.downloaders, "downloaders should still be alive during grace period")
+	assert.NotNil(t, item.graceTimer, "grace timer should be set")
+	item.mu.Unlock()
+
+	// Re-open the item - should reuse existing fd and downloaders
+	require.NoError(t, item.Open(obj))
+
+	// Read data to verify it works
+	n, err = item.ReadAt(buf, 10)
+	assert.Equal(t, 10, n)
+	require.NoError(t, err)
+	assert.Equal(t, contents[10:20], string(buf[:n]))
+
+	// Close again
+	require.NoError(t, item.Close(nil))
+
+	// Wait for grace period to expire
+	time.Sleep(1500 * time.Millisecond)
+
+	// After grace period, fd and downloaders should be cleaned up
+	item.mu.Lock()
+	assert.Nil(t, item.fd, "fd should be closed after grace period")
+	assert.Nil(t, item.downloaders, "downloaders should be closed after grace period")
+	assert.Nil(t, item.graceTimer, "grace timer should be nil after expiry")
+	item.mu.Unlock()
+}
+
+func TestItemHandleCachingDisabled(t *testing.T) {
+	r, c := newItemTestCacheHandleCaching(t, 0)
+
+	contents, obj, item := newFile(t, r, c, "existing")
+	_ = contents
+
+	// Open and close the item
+	require.NoError(t, item.Open(obj))
+	require.NoError(t, item.Close(nil))
+
+	// With handle caching disabled, fd and downloaders should be immediately closed
+	item.mu.Lock()
+	assert.Nil(t, item.fd, "fd should be closed immediately when handle caching disabled")
+	assert.Nil(t, item.downloaders, "downloaders should be closed immediately when handle caching disabled")
+	assert.Nil(t, item.graceTimer, "grace timer should not be set when handle caching disabled")
+	item.mu.Unlock()
+}
+
+func TestItemHandleCachingReset(t *testing.T) {
+	r, c := newItemTestCacheHandleCaching(t, 1*time.Second)
+
+	_, obj, item := newFile(t, r, c, "existing")
+
+	// Open, read (to instantiate cache), and close the item
+	require.NoError(t, item.Open(obj))
+
+	buf := make([]byte, 10)
+	_, err := item.ReadAt(buf, 0)
+	require.NoError(t, err)
+
+	require.NoError(t, item.Close(nil))
+
+	// Grace timer should be active
+	item.mu.Lock()
+	assert.NotNil(t, item.graceTimer, "grace timer should be set")
+	item.mu.Unlock()
+
+	// Reset should skip the item during grace period
+	rr, _, err := item.Reset()
+	require.NoError(t, err)
+	assert.Equal(t, SkippedGrace, rr)
+
+	// Grace timer should still be active
+	item.mu.Lock()
+	assert.NotNil(t, item.graceTimer, "grace timer should still be set after skipped reset")
+	item.mu.Unlock()
+
+	// Wait for grace period to expire then reset should remove the item
+	time.Sleep(1500 * time.Millisecond)
+
+	rr, _, err = item.Reset()
+	require.NoError(t, err)
+	assert.Equal(t, RemovedNotInUse, rr)
 }

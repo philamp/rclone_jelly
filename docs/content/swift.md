@@ -1,18 +1,20 @@
 ---
 title: "Swift"
 description: "Swift"
+versionIntroduced: "v0.91"
 ---
 
-# {{< icon "fa fa-space-shuttle" >}}Swift
+# Swift
 
 Swift refers to [OpenStack Object Storage](https://docs.openstack.org/swift/latest/).
 Commercial implementations of that being:
 
-  * [Rackspace Cloud Files](https://www.rackspace.com/cloud/files/)
-  * [Memset Memstore](https://www.memset.com/cloud/storage/)
-  * [OVH Object Storage](https://www.ovh.co.uk/public-cloud/storage/object-storage/)
-  * [Oracle Cloud Storage](https://cloud.oracle.com/object-storage/buckets)
-  * [IBM Bluemix Cloud ObjectStorage Swift](https://console.bluemix.net/docs/infrastructure/objectstorage-swift/index.html)
+- [Rackspace Cloud Files](https://www.rackspace.com/cloud/files/)
+- [Memset Memstore](https://www.memset.com/cloud/storage/)
+- [OVH Object Storage](https://www.ovhcloud.com/en/public-cloud/object-storage/)
+- [Oracle Cloud Storage](https://docs.oracle.com/en-us/iaas/integration/doc/configure-object-storage.html)
+- [Blomp Cloud Storage](https://www.blomp.com/cloud-storage/)
+- [IBM Bluemix Cloud ObjectStorage Swift](https://console.bluemix.net/docs/infrastructure/objectstorage-swift/index.html)
 
 Paths are specified as `remote:container` (or `remote:` for the `lsd`
 command.)  You may put subdirectories in too, e.g. `remote:container/path/to/dir`.
@@ -21,12 +23,14 @@ command.)  You may put subdirectories in too, e.g. `remote:container/path/to/dir
 
 Here is an example of making a swift configuration.  First run
 
-    rclone config
+```console
+rclone config
+```
 
 This will guide you through an interactive setup process.
 
-```
-No remotes found, make a new one?
+```text
+No remotes found, make a new one\?
 n) New remote
 s) Set configuration password
 q) Quit config
@@ -35,7 +39,7 @@ name> remote
 Type of storage to configure.
 Choose a number from below, or type in your own value
 [snip]
-XX / OpenStack Swift (Rackspace Cloud Files, Memset Memstore, OVH)
+XX / OpenStack Swift (Rackspace Cloud Files, Blomp Cloud Storage, Memset Memstore, OVH)
    \ "swift"
 [snip]
 Storage> swift
@@ -64,6 +68,8 @@ Choose a number from below, or type in your own value
    \ "https://auth.storage.memset.com/v2.0"
  6 / OVH
    \ "https://auth.cloud.ovh.net/v3"
+ 7  / Blomp Cloud Storage
+   \ "https://authenticate.ain.net"
 auth> 
 User ID to log in - optional - most swift systems use user and leave this blank (v3 auth) (OS_USER_ID).
 user_id> 
@@ -120,27 +126,35 @@ This remote is called `remote` and can now be used like this
 
 See all containers
 
-    rclone lsd remote:
+```console
+rclone lsd remote:
+```
 
 Make a new container
 
-    rclone mkdir remote:container
+```console
+rclone mkdir remote:container
+```
 
 List the contents of a container
 
-    rclone ls remote:container
+```console
+rclone ls remote:container
+```
 
 Sync `/home/local/directory` to the remote container, deleting any
 excess files in the container.
 
-    rclone sync -i /home/local/directory remote:container
+```console
+rclone sync --interactive /home/local/directory remote:container
+```
 
 ### Configuration from an OpenStack credentials file
 
 An OpenStack credentials file typically looks something something
 like this (without the comments)
 
-```
+```sh
 export OS_AUTH_URL=https://a.provider.net/v2.0
 export OS_TENANT_ID=ffffffffffffffffffffffffffffffff
 export OS_TENANT_NAME="1234567890123456"
@@ -156,7 +170,7 @@ The config file needs to look something like this where `$OS_USERNAME`
 represents the value of the `OS_USERNAME` variable - `123abc567xy` in
 the example above.
 
-```
+```ini
 [remote]
 type = swift
 user = $OS_USERNAME
@@ -184,12 +198,12 @@ in the docs for the swift library.
 ### Using an alternate authentication method
 
 If your OpenStack installation uses a non-standard authentication method
-that might not be yet supported by rclone or the underlying swift library, 
-you can authenticate externally (e.g. calling manually the `openstack` 
-commands to get a token). Then, you just need to pass the two 
-configuration variables ``auth_token`` and ``storage_url``. 
-If they are both provided, the other variables are ignored. rclone will 
-not try to authenticate but instead assume it is already authenticated 
+that might not be yet supported by rclone or the underlying swift library,
+you can authenticate externally (e.g. calling manually the `openstack`
+commands to get a token). Then, you just need to pass the two
+configuration variables ``auth_token`` and ``storage_url``.
+If they are both provided, the other variables are ignored. rclone will
+not try to authenticate but instead assume it is already authenticated
 and use these two variables to access the OpenStack installation.
 
 #### Using rclone without a config file
@@ -197,7 +211,7 @@ and use these two variables to access the OpenStack installation.
 You can use rclone with swift without a config file, if desired, like
 this:
 
-```
+```sh
 source openstack-credentials-file
 export RCLONE_CONFIG_MYREMOTE_TYPE=swift
 export RCLONE_CONFIG_MYREMOTE_ENV_AUTH=true
@@ -223,7 +237,7 @@ sufficient to determine if it is "dirty". By using `--update` along with
 `--use-server-modtime`, you can avoid the extra API call and simply upload
 files whose local modtime is newer than the time it was last uploaded.
 
-### Modified time
+### Modification times and hashes
 
 The modified time is stored as metadata on the object as
 `X-Object-Meta-Mtime` as floating point since the epoch accurate to 1
@@ -231,6 +245,8 @@ ns.
 
 This is a de facto standard (used in the official python-swiftclient
 amongst others) for storing the modification time for an object.
+
+The MD5 hash algorithm is supported.
 
 ### Restricted filename characters
 
@@ -242,10 +258,10 @@ amongst others) for storing the modification time for an object.
 Invalid UTF-8 bytes will also be [replaced](/overview/#invalid-utf8),
 as they can't be used in JSON strings.
 
-{{< rem autogenerated options start" - DO NOT EDIT - instead edit fs.RegInfo in backend/swift/swift.go then run make backenddocs" >}}
+<!-- autogenerated options start - DO NOT EDIT - instead edit fs.RegInfo in backend/swift/swift.go and run make backenddocs to verify --> <!-- markdownlint-disable-line line-length -->
 ### Standard options
 
-Here are the standard options specific to swift (OpenStack Swift (Rackspace Cloud Files, Memset Memstore, OVH)).
+Here are the Standard options specific to swift (OpenStack Swift (Rackspace Cloud Files, Blomp Cloud Storage, Memset Memstore, OVH)).
 
 #### --swift-env-auth
 
@@ -258,11 +274,11 @@ Properties:
 - Type:        bool
 - Default:     false
 - Examples:
-    - "false"
-        - Enter swift credentials in the next step.
-    - "true"
-        - Get swift credentials from environment vars.
-        - Leave other fields blank if using this.
+  - "false"
+    - Enter swift credentials in the next step.
+  - "true"
+    - Get swift credentials from environment vars.
+    - Leave other fields blank if using this.
 
 #### --swift-user
 
@@ -297,18 +313,20 @@ Properties:
 - Type:        string
 - Required:    false
 - Examples:
-    - "https://auth.api.rackspacecloud.com/v1.0"
-        - Rackspace US
-    - "https://lon.auth.api.rackspacecloud.com/v1.0"
-        - Rackspace UK
-    - "https://identity.api.rackspacecloud.com/v2.0"
-        - Rackspace v2
-    - "https://auth.storage.memset.com/v1.0"
-        - Memset Memstore UK
-    - "https://auth.storage.memset.com/v2.0"
-        - Memset Memstore UK v2
-    - "https://auth.cloud.ovh.net/v3"
-        - OVH
+  - "https://auth.api.rackspacecloud.com/v1.0"
+    - Rackspace US
+  - "https://lon.auth.api.rackspacecloud.com/v1.0"
+    - Rackspace UK
+  - "https://identity.api.rackspacecloud.com/v2.0"
+    - Rackspace v2
+  - "https://auth.storage.memset.com/v1.0"
+    - Memset Memstore UK
+  - "https://auth.storage.memset.com/v2.0"
+    - Memset Memstore UK v2
+  - "https://auth.cloud.ovh.net/v3"
+    - OVH
+  - "https://authenticate.ain.net"
+    - Blomp Cloud Storage
 
 #### --swift-user-id
 
@@ -453,12 +471,12 @@ Properties:
 - Type:        string
 - Default:     "public"
 - Examples:
-    - "public"
-        - Public (default, choose this if not sure)
-    - "internal"
-        - Internal (use internal service net)
-    - "admin"
-        - Admin
+  - "public"
+    - Public (default, choose this if not sure)
+  - "internal"
+    - Internal (use internal service net)
+  - "admin"
+    - Admin
 
 #### --swift-storage-policy
 
@@ -476,16 +494,16 @@ Properties:
 - Type:        string
 - Required:    false
 - Examples:
-    - ""
-        - Default
-    - "pcs"
-        - OVH Public Cloud Storage
-    - "pca"
-        - OVH Public Cloud Archive
+  - ""
+    - Default
+  - "pcs"
+    - OVH Public Cloud Storage
+  - "pca"
+    - OVH Public Cloud Archive
 
 ### Advanced options
 
-Here are the advanced options specific to swift (OpenStack Swift (Rackspace Cloud Files, Memset Memstore, OVH)).
+Here are the Advanced options specific to swift (OpenStack Swift (Rackspace Cloud Files, Blomp Cloud Storage, Memset Memstore, OVH)).
 
 #### --swift-leave-parts-on-error
 
@@ -500,12 +518,59 @@ Properties:
 - Type:        bool
 - Default:     false
 
+#### --swift-fetch-until-empty-page
+
+When paginating, always fetch unless we received an empty page.
+
+Consider using this option if rclone listings show fewer objects
+than expected, or if repeated syncs copy unchanged objects.
+
+It is safe to enable this, but rclone may make more API calls than
+necessary.
+
+This is one of a pair of workarounds to handle implementations
+of the Swift API that do not implement pagination as expected.  See
+also "partial_page_fetch_threshold".
+
+Properties:
+
+- Config:      fetch_until_empty_page
+- Env Var:     RCLONE_SWIFT_FETCH_UNTIL_EMPTY_PAGE
+- Type:        bool
+- Default:     false
+
+#### --swift-partial-page-fetch-threshold
+
+When paginating, fetch if the current page is within this percentage of the limit.
+
+Consider using this option if rclone listings show fewer objects
+than expected, or if repeated syncs copy unchanged objects.
+
+It is safe to enable this, but rclone may make more API calls than
+necessary.
+
+This is one of a pair of workarounds to handle implementations
+of the Swift API that do not implement pagination as expected.  See
+also "fetch_until_empty_page".
+
+Properties:
+
+- Config:      partial_page_fetch_threshold
+- Env Var:     RCLONE_SWIFT_PARTIAL_PAGE_FETCH_THRESHOLD
+- Type:        int
+- Default:     0
+
 #### --swift-chunk-size
 
-Above this size files will be chunked into a _segments container.
+Above this size files will be chunked.
 
-Above this size files will be chunked into a _segments container.  The
-default for this is 5 GiB which is its maximum value.
+Above this size files will be chunked into a `_segments` container
+or a `.file-segments` directory. (See the `use_segments_container` option
+for more info). Default for this is 5 GiB which is its maximum value, which
+means only files above this size will be chunked.
+
+Rclone uploads chunked files as dynamic large objects (DLO).
+
 
 Properties:
 
@@ -518,14 +583,16 @@ Properties:
 
 Don't chunk files during streaming upload.
 
-When doing streaming uploads (e.g. using rcat or mount) setting this
-flag will cause the swift backend to not upload chunked files.
+When doing streaming uploads (e.g. using `rcat` or `mount` with
+`--vfs-cache-mode off`) setting this flag will cause the swift backend
+to not upload chunked files.
 
-This will limit the maximum upload size to 5 GiB. However non chunked
-files are easier to deal with and have an MD5SUM.
+This will limit the maximum streamed upload size to 5 GiB. This is
+useful because non chunked files are easier to deal with and have an
+MD5SUM.
 
-Rclone will still chunk files bigger than chunk_size when doing normal
-copy operations.
+Rclone will still chunk files bigger than `chunk_size` when doing
+normal copy operations.
 
 Properties:
 
@@ -533,6 +600,73 @@ Properties:
 - Env Var:     RCLONE_SWIFT_NO_CHUNK
 - Type:        bool
 - Default:     false
+
+#### --swift-no-large-objects
+
+Disable support for static and dynamic large objects
+
+Swift cannot transparently store files bigger than 5 GiB. There are
+two schemes for chunking large files, static large objects (SLO) or
+dynamic large objects (DLO), and the API does not allow rclone to
+determine whether a file is a static or dynamic large object without
+doing a HEAD on the object. Since these need to be treated
+differently, this means rclone has to issue HEAD requests for objects
+for example when reading checksums.
+
+When `no_large_objects` is set, rclone will assume that there are no
+static or dynamic large objects stored. This means it can stop doing
+the extra HEAD calls which in turn increases performance greatly
+especially when doing a swift to swift transfer with `--checksum` set.
+
+Setting this option implies `no_chunk` and also that no files will be
+uploaded in chunks, so files bigger than 5 GiB will just fail on
+upload.
+
+If you set this option and there **are** static or dynamic large objects,
+then this will give incorrect hashes for them. Downloads will succeed,
+but other operations such as Remove and Copy will fail.
+
+
+Properties:
+
+- Config:      no_large_objects
+- Env Var:     RCLONE_SWIFT_NO_LARGE_OBJECTS
+- Type:        bool
+- Default:     false
+
+#### --swift-use-segments-container
+
+Choose destination for large object segments
+
+Swift cannot transparently store files bigger than 5 GiB and rclone
+will chunk files larger than `chunk_size` (default 5 GiB) in order to
+upload them.
+
+If this value is `true` the chunks will be stored in an additional
+container named the same as the destination container but with
+`_segments` appended. This means that there won't be any duplicated
+data in the original container but having another container may not be
+acceptable.
+
+If this value is `false` the chunks will be stored in a
+`.file-segments` directory in the root of the container. This
+directory will be omitted when listing the container. Some
+providers (eg Blomp) require this mode as creating additional
+containers isn't allowed. If it is desired to see the `.file-segments`
+directory in the root then this flag must be set to `true`.
+
+If this value is `unset` (the default), then rclone will choose the value
+to use. It will be `false` unless rclone detects any `auth_url`s that
+it knows need it to be `true`. In this case you'll see a message in
+the DEBUG log.
+
+
+Properties:
+
+- Config:      use_segments_container
+- Env Var:     RCLONE_SWIFT_USE_SEGMENTS_CONTAINER
+- Type:        Tristate
+- Default:     unset
 
 #### --swift-encoding
 
@@ -544,10 +678,21 @@ Properties:
 
 - Config:      encoding
 - Env Var:     RCLONE_SWIFT_ENCODING
-- Type:        MultiEncoder
+- Type:        Encoding
 - Default:     Slash,InvalidUtf8
 
-{{< rem autogenerated options stop >}}
+#### --swift-description
+
+Description of the remote.
+
+Properties:
+
+- Config:      description
+- Env Var:     RCLONE_SWIFT_DESCRIPTION
+- Type:        string
+- Required:    false
+
+<!-- autogenerated options stop -->
 
 ## Limitations
 
@@ -576,16 +721,23 @@ setting up a swift remote.
 
 ## OVH Cloud Archive
 
-To use rclone with OVH cloud archive, first use `rclone config` to set up a `swift` backend with OVH, choosing `pca` as the `storage_policy`.
+To use rclone with OVH cloud archive, first use `rclone config` to set up a
+`swift` backend with OVH, choosing `pca` as the `storage_policy`.
 
 ### Uploading Objects
 
-Uploading objects to OVH cloud archive is no different to object storage, you just simply run the command you like (move, copy or sync) to upload the objects. Once uploaded the objects will show in a "Frozen" state within the OVH control panel.
+Uploading objects to OVH cloud archive is no different to object storage, you
+just simply run the command you like (move, copy or sync) to upload the objects.
+Once uploaded the objects will show in a "Frozen" state within the OVH control panel.
 
 ### Retrieving Objects
 
-To retrieve objects use `rclone copy` as normal. If the objects are in a frozen state then rclone will ask for them all to be unfrozen and it will wait at the end of the output with a message like the following:
+To retrieve objects use `rclone copy` as normal. If the objects are in a frozen
+state then rclone will ask for them all to be unfrozen and it will wait at the
+end of the output with a message like the following:
 
-`2019/03/23 13:06:33 NOTICE: Received retry after error - sleeping until 2019-03-23T13:16:33.481657164+01:00 (9m59.99985121s)`
+```text
+2019/03/23 13:06:33 NOTICE: Received retry after error - sleeping until 2019-03-23T13:16:33.481657164+01:00 (9m59.99985121s)
+```
 
 Rclone will wait for the time specified then retry the copy.

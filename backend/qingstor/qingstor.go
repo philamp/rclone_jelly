@@ -1,9 +1,7 @@
+//go:build !plan9 && !js
+
 // Package qingstor provides an interface to QingStor object storage
 // Home: https://www.qingcloud.com/
-
-//go:build !plan9 && !js
-// +build !plan9,!js
-
 package qingstor
 
 import (
@@ -24,7 +22,7 @@ import (
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
-	"github.com/rclone/rclone/fs/walk"
+	"github.com/rclone/rclone/fs/list"
 	"github.com/rclone/rclone/lib/bucket"
 	"github.com/rclone/rclone/lib/encoder"
 	qsConfig "github.com/yunify/qingstor-sdk-go/v3/config"
@@ -50,11 +48,13 @@ func init() {
 				Help:  "Get QingStor credentials from the environment (env vars or IAM).",
 			}},
 		}, {
-			Name: "access_key_id",
-			Help: "QingStor Access Key ID.\n\nLeave blank for anonymous access or runtime credentials.",
+			Name:      "access_key_id",
+			Help:      "QingStor Access Key ID.\n\nLeave blank for anonymous access or runtime credentials.",
+			Sensitive: true,
 		}, {
-			Name: "secret_access_key",
-			Help: "QingStor Secret Access Key (password).\n\nLeave blank for anonymous access or runtime credentials.",
+			Name:      "secret_access_key",
+			Help:      "QingStor Secret Access Key (password).\n\nLeave blank for anonymous access or runtime credentials.",
+			Sensitive: true,
 		}, {
 			Name: "endpoint",
 			Help: "Enter an endpoint URL to connection QingStor API.\n\nLeave blank will use the default value \"https://qingstor.com:443\".",
@@ -253,7 +253,7 @@ func qsServiceConnection(ctx context.Context, opt *Options) (*qs.Service, error)
 		_protocol, _host, _port, err := qsParseEndpoint(endpoint)
 
 		if err != nil {
-			return nil, fmt.Errorf("The endpoint \"%s\" format error", endpoint)
+			return nil, fmt.Errorf("the endpoint \"%s\" format error", endpoint)
 		}
 
 		if _protocol != "" {
@@ -431,9 +431,9 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 
 // Copy src to this remote using server-side copy operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -477,7 +477,7 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 
 // Return an Object from a path
 //
-//If it can't be found it returns the error ErrorObjectNotFound.
+// If it can't be found it returns the error ErrorObjectNotFound.
 func (f *Fs) newObjectWithInfo(remote string, info *qs.KeyType) (fs.Object, error) {
 	o := &Object{
 		fs:     f,
@@ -573,9 +573,7 @@ func (f *Fs) list(ctx context.Context, bucket, directory, prefix string, addBuck
 				if addBucket {
 					remote = path.Join(bucket, remote)
 				}
-				if strings.HasSuffix(remote, "/") {
-					remote = remote[:len(remote)-1]
-				}
+				remote = strings.TrimSuffix(remote, "/")
 				err = fn(remote, &qs.KeyType{Key: &remote}, true)
 				if err != nil {
 					return err
@@ -706,7 +704,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // of listing recursively that doing a directory traversal.
 func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (err error) {
 	bucket, directory := f.split(dir)
-	list := walk.NewListRHelper(callback)
+	list := list.NewHelper(callback)
 	listR := func(bucket, directory, prefix string, addBucket bool) error {
 		return f.list(ctx, bucket, directory, prefix, addBucket, true, func(remote string, object *qs.KeyType, isDirectory bool) error {
 			entry, err := f.itemToDirEntry(remote, object, isDirectory)
@@ -775,8 +773,6 @@ func (f *Fs) makeBucket(ctx context.Context, bucket string) error {
 				retries++
 				wasDeleted = true
 				continue
-			default:
-				break
 			}
 			break
 		}
@@ -854,7 +850,6 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 						continue
 					default:
 						err = e
-						break
 					}
 				}
 			} else {

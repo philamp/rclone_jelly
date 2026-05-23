@@ -2,6 +2,7 @@ package serve
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 type DirEntry struct {
 	remote  string
 	URL     string
+	ZipURL  string
 	Leaf    string
 	IsDir   bool
 	Size    int64
@@ -31,6 +33,8 @@ type Directory struct {
 	DirRemote    string
 	Title        string
 	Name         string
+	ZipURL       string
+	DisableZip   bool
 	Entries      []DirEntry
 	Query        string
 	HTMLTemplate *template.Template
@@ -69,6 +73,7 @@ func NewDirectory(dirRemote string, htmlTemplate *template.Template) *Directory 
 		DirRemote:    dirRemote,
 		Title:        fmt.Sprintf("Directory listing of /%s", dirRemote),
 		Name:         fmt.Sprintf("/%s", dirRemote),
+		ZipURL:       "?download=zip",
 		HTMLTemplate: htmlTemplate,
 		Breadcrumb:   breadcrumb,
 	}
@@ -98,11 +103,15 @@ func (d *Directory) AddHTMLEntry(remote string, isDir bool, size int64, modTime 
 	d.Entries = append(d.Entries, DirEntry{
 		remote:  remote,
 		URL:     rest.URLPathEscape(urlRemote) + d.Query,
+		ZipURL:  "",
 		Leaf:    leaf,
 		IsDir:   isDir,
 		Size:    size,
 		ModTime: modTime,
 	})
+	if isDir {
+		d.Entries[len(d.Entries)-1].ZipURL = rest.URLPathEscape(urlRemote) + "?download=zip"
+	}
 }
 
 // AddEntry adds an entry to that directory
@@ -124,8 +133,8 @@ func (d *Directory) AddEntry(remote string, isDir bool) {
 }
 
 // Error logs the error and if a ResponseWriter is given it writes an http.StatusInternalServerError
-func Error(what interface{}, w http.ResponseWriter, text string, err error) {
-	err = fs.CountError(err)
+func Error(ctx context.Context, what any, w http.ResponseWriter, text string, err error) {
+	err = fs.CountError(ctx, err)
 	fs.Errorf(what, "%s: %v", text, err)
 	if w != nil {
 		http.Error(w, text+".", http.StatusInternalServerError)
@@ -223,8 +232,9 @@ const (
 
 // Serve serves a directory
 func (d *Directory) Serve(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	// Account the transfer
-	tr := accounting.Stats(r.Context()).NewTransferRemoteSize(d.DirRemote, -1)
+	tr := accounting.Stats(r.Context()).NewTransferRemoteSize(d.DirRemote, -1, nil, nil)
 	defer tr.Done(r.Context(), nil)
 
 	fs.Infof(d.DirRemote, "%s: Serving directory", r.RemoteAddr)
@@ -232,11 +242,13 @@ func (d *Directory) Serve(w http.ResponseWriter, r *http.Request) {
 	buf := &bytes.Buffer{}
 	err := d.HTMLTemplate.Execute(buf, d)
 	if err != nil {
-		Error(d.DirRemote, w, "Failed to render template", err)
+		Error(ctx, d.DirRemote, w, "Failed to render template", err)
 		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", buf.Len()))
 	_, err = buf.WriteTo(w)
 	if err != nil {
-		Error(d.DirRemote, nil, "Failed to drain template buffer", err)
+		Error(ctx, d.DirRemote, nil, "Failed to drain template buffer", err)
 	}
 }

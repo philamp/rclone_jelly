@@ -1,5 +1,4 @@
 //go:build linux || (darwin && amd64)
-// +build linux darwin,amd64
 
 package mount2
 
@@ -85,17 +84,16 @@ func (n *Node) lookupVfsNodeInDir(leaf string) (vfsNode vfs.Node, errno syscall.
 // will not work.
 func (n *Node) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 	defer log.Trace(n, "")("out=%+v", &out)
-	out = new(fuse.StatfsOut)
 	const blockSize = 4096
-	const fsBlocks = (1 << 50) / blockSize
-	out.Blocks = fsBlocks  // Total data blocks in file system.
-	out.Bfree = fsBlocks   // Free blocks in file system.
-	out.Bavail = fsBlocks  // Free blocks in file system if you're not root.
-	out.Files = 1e9        // Total files in file system.
-	out.Ffree = 1e9        // Free files in file system.
-	out.Bsize = blockSize  // Block size
-	out.NameLen = 255      // Maximum file name length?
-	out.Frsize = blockSize // Fragment size, smallest addressable data size in the file system.
+	total, _, free := n.fsys.VFS.Statfs()
+	out.Blocks = uint64(total) / blockSize // Total data blocks in file system.
+	out.Bfree = uint64(free) / blockSize   // Free blocks in file system.
+	out.Bavail = out.Bfree                 // Free blocks in file system if you're not root.
+	out.Files = 1e9                        // Total files in file system.
+	out.Ffree = 1e9                        // Free files in file system.
+	out.Bsize = blockSize                  // Block size
+	out.NameLen = 255                      // Maximum file name length?
+	out.Frsize = blockSize                 // Fragment size, smallest addressable data size in the file system.
 	mountlib.ClipBlocks(&out.Blocks)
 	mountlib.ClipBlocks(&out.Bfree)
 	mountlib.ClipBlocks(&out.Bavail)
@@ -157,6 +155,9 @@ func (n *Node) Open(ctx context.Context, flags uint32) (fh fusefs.FileHandle, fu
 	}
 	// If size unknown then use direct io to read
 	if entry := n.node.DirEntry(); entry != nil && entry.Size() < 0 {
+		fuseFlags |= fuse.FOPEN_DIRECT_IO
+	}
+	if n.fsys.opt.DirectIO {
 		fuseFlags |= fuse.FOPEN_DIRECT_IO
 	}
 	return newFileHandle(handle, n.fsys), fuseFlags, 0
@@ -226,7 +227,7 @@ type dirStream struct {
 // HasNext indicates if there are further entries. HasNext
 // might be called on already closed streams.
 func (ds *dirStream) HasNext() bool {
-	return ds.i < len(ds.nodes)
+	return ds.i < len(ds.nodes)+2
 }
 
 // Next retrieves the next entry. It is only called if HasNext
@@ -234,7 +235,22 @@ func (ds *dirStream) HasNext() bool {
 // indicate I/O errors
 func (ds *dirStream) Next() (de fuse.DirEntry, errno syscall.Errno) {
 	// defer log.Trace(nil, "")("de=%+v, errno=%v", &de, &errno)
-	fi := ds.nodes[ds.i]
+	if ds.i == 0 {
+		ds.i++
+		return fuse.DirEntry{
+			Mode: fuse.S_IFDIR,
+			Name: ".",
+			Ino:  0, // FIXME
+		}, 0
+	} else if ds.i == 1 {
+		ds.i++
+		return fuse.DirEntry{
+			Mode: fuse.S_IFDIR,
+			Name: "..",
+			Ino:  0, // FIXME
+		}, 0
+	}
+	fi := ds.nodes[ds.i-2]
 	de = fuse.DirEntry{
 		// Mode is the file's mode. Only the high bits (e.g. S_IFDIR)
 		// are considered.
@@ -405,3 +421,68 @@ func (n *Node) Rename(ctx context.Context, oldName string, newParent fusefs.Inod
 }
 
 var _ = (fusefs.NodeRenamer)((*Node)(nil))
+
+// Getxattr should read data for the given attribute into
+// `dest` and return the number of bytes. If `dest` is too
+// small, it should return ERANGE and the size of the attribute.
+// If not defined, Getxattr will return ENOATTR.
+func (n *Node) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
+	return 0, syscall.ENOSYS // we never implement this
+}
+
+var _ fusefs.NodeGetxattrer = (*Node)(nil)
+
+// Setxattr should store data for the given attribute.  See
+// setxattr(2) for information about flags.
+// If not defined, Setxattr will return ENOATTR.
+func (n *Node) Setxattr(ctx context.Context, attr string, data []byte, flags uint32) syscall.Errno {
+	return syscall.ENOSYS // we never implement this
+}
+
+var _ fusefs.NodeSetxattrer = (*Node)(nil)
+
+// Removexattr should delete the given attribute.
+// If not defined, Removexattr will return ENOATTR.
+func (n *Node) Removexattr(ctx context.Context, attr string) syscall.Errno {
+	return syscall.ENOSYS // we never implement this
+}
+
+var _ fusefs.NodeRemovexattrer = (*Node)(nil)
+
+// Listxattr should read all attributes (null terminated) into
+// `dest`. If the `dest` buffer is too small, it should return ERANGE
+// and the correct size.  If not defined, return an empty list and
+// success.
+func (n *Node) Listxattr(ctx context.Context, dest []byte) (uint32, syscall.Errno) {
+	return 0, syscall.ENOSYS // we never implement this
+}
+
+var _ fusefs.NodeListxattrer = (*Node)(nil)
+
+var _ fusefs.NodeReadlinker = (*Node)(nil)
+
+// Readlink read symbolic link target.
+func (n *Node) Readlink(ctx context.Context) (ret []byte, err syscall.Errno) {
+	defer log.Trace(n, "")("ret=%v, err=%v", &ret, &err)
+	path := n.node.Path()
+	s, serr := n.node.VFS().Readlink(path)
+	return []byte(s), translateError(serr)
+}
+
+var _ fusefs.NodeSymlinker = (*Node)(nil)
+
+// Symlink create symbolic link.
+func (n *Node) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (node *fusefs.Inode, err syscall.Errno) {
+	defer log.Trace(n, "name=%v, target=%v", name, target)("node=%v, err=%v", &node, &err)
+	fullPath := path.Join(n.node.Path(), name)
+	vfsNode, serr := n.node.VFS().CreateSymlink(target, fullPath)
+	if serr != nil {
+		return nil, translateError(serr)
+	}
+
+	n.fsys.setEntryOut(vfsNode, out)
+	newNode := newNode(n.fsys, vfsNode)
+	newInode := n.NewInode(ctx, newNode, fusefs.StableAttr{Mode: out.Attr.Mode})
+
+	return newInode, 0
+}

@@ -11,6 +11,7 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
 	"github.com/rclone/rclone/fs/rc"
+	"github.com/rclone/rclone/vfs/vfscache/writeback"
 )
 
 const getVFSHelp = ` 
@@ -227,7 +228,7 @@ func rcForget(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 	return out, nil
 }
 
-func getDuration(k string, v interface{}) (time.Duration, error) {
+func getDuration(k string, v any) (time.Duration, error) {
 	s, ok := v.(string)
 	if !ok {
 		return 0, fmt.Errorf("value must be string %q=%v", k, v)
@@ -277,9 +278,9 @@ func getStatus(vfs *VFS, in rc.Params) (out rc.Params, err error) {
 	return rc.Params{
 		"enabled":   vfs.Opt.PollInterval != 0,
 		"supported": vfs.pollChan != nil,
-		"interval": map[string]interface{}{
+		"interval": map[string]any{
 			"raw":     vfs.Opt.PollInterval,
-			"seconds": vfs.Opt.PollInterval / time.Second,
+			"seconds": time.Duration(vfs.Opt.PollInterval) / time.Second,
 			"string":  vfs.Opt.PollInterval.String(),
 		},
 	}, nil
@@ -347,7 +348,7 @@ func rcPollInterval(ctx context.Context, in rc.Params) (out rc.Params, err error
 	}
 	select {
 	case vfs.pollChan <- interval:
-		vfs.Opt.PollInterval = interval
+		vfs.Opt.PollInterval = fs.Duration(interval)
 	case <-timeoutChan:
 		timeoutHit = true
 	}
@@ -360,8 +361,9 @@ func rcPollInterval(ctx context.Context, in rc.Params) (out rc.Params, err error
 
 func init() {
 	rc.Add(rc.Call{
-		Path:  "vfs/list",
-		Title: "List active VFSes.",
+		Path:   "vfs/list",
+		NoAuth: true,
+		Title:  "List active VFSes.",
 		Help: `
 This lists the active VFSes.
 
@@ -392,8 +394,9 @@ func rcList(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 
 func init() {
 	rc.Add(rc.Call{
-		Path:  "vfs/stats",
-		Title: "Stats for a VFS.",
+		Path:   "vfs/stats",
+		NoAuth: true,
+		Title:  "Stats for a VFS.",
 		Help: `
 This returns stats for the selected VFS.
 
@@ -436,4 +439,121 @@ func rcStats(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 		return nil, err
 	}
 	return vfs.Stats(), nil
+}
+
+func init() {
+	rc.Add(rc.Call{
+		Path:   "vfs/queue",
+		NoAuth: true,
+		Title:  "Queue info for a VFS.",
+		Help: strings.ReplaceAll(`
+This returns info about the upload queue for the selected VFS.
+
+This is only useful if |--vfs-cache-mode| > off. If you call it when
+the |--vfs-cache-mode| is off, it will return an empty result.
+
+    {
+        "queue": // an array of files queued for upload
+        [
+            {
+                "name":      "file",   // string: name (full path) of the file,
+                "id":        123,      // integer: id of this item in the queue,
+                "size":      79,       // integer: size of the file in bytes
+                "expiry":    1.5       // float: time until file is eligible for transfer, lowest goes first
+                "tries":     1,        // integer: number of times we have tried to upload
+                "delay":     5.0,      // float: seconds between upload attempts
+                "uploading": false,    // boolean: true if item is being uploaded
+            },
+       ],
+    }
+
+The |expiry| time is the time until the file is eligible for being
+uploaded in floating point seconds. This may go negative. As rclone
+only transfers |--transfers| files at once, only the lowest
+|--transfers| expiry times will have |uploading| as |true|. So there
+may be files with negative expiry times for which |uploading| is
+|false|.
+
+`, "|", "`") + getVFSHelp,
+		Fn: rcQueue,
+	})
+}
+
+func rcQueue(ctx context.Context, in rc.Params) (out rc.Params, err error) {
+	vfs, err := getVFS(in)
+	if err != nil {
+		return nil, err
+	}
+	if vfs.cache == nil {
+		return nil, nil
+	}
+	return vfs.cache.Queue(), nil
+}
+
+func init() {
+	rc.Add(rc.Call{
+		Path:  "vfs/queue-set-expiry",
+		Title: "Set the expiry time for an item queued for upload.",
+		Help: strings.ReplaceAll(`
+
+Use this to adjust the |expiry| time for an item in the upload queue.
+You will need to read the |id| of the item using |vfs/queue| before
+using this call.
+
+You can then set |expiry| to a floating point number of seconds from
+now when the item is eligible for upload. If you want the item to be
+uploaded as soon as possible then set it to a large negative number (eg
+-1000000000). If you want the upload of the item to be delayed
+for a long time then set it to a large positive number.
+
+Setting the |expiry| of an item which has already has started uploading
+will have no effect - the item will carry on being uploaded.
+
+This will return an error if called with |--vfs-cache-mode| off or if
+the |id| passed is not found.
+
+This takes the following parameters
+
+- |fs| - select the VFS in use (optional)
+- |id| - a numeric ID as returned from |vfs/queue|
+- |expiry| - a new expiry time as floating point seconds
+- |relative| - if set, expiry is to be treated as relative to the current expiry (optional, boolean)
+
+This returns an empty result on success, or an error.
+
+`, "|", "`") + getVFSHelp,
+		Fn: rcQueueSetExpiry,
+	})
+}
+
+func rcQueueSetExpiry(ctx context.Context, in rc.Params) (out rc.Params, err error) {
+	vfs, err := getVFS(in)
+	if err != nil {
+		return nil, err
+	}
+	if vfs.cache == nil {
+		return nil, rc.NewErrParamInvalid(errors.New("can't call this unless using the VFS cache"))
+	}
+
+	// Read input values
+	id, err := in.GetInt64("id")
+	if err != nil {
+		return nil, err
+	}
+	expiry, err := in.GetFloat64("expiry")
+	if err != nil {
+		return nil, err
+	}
+	relative, err := in.GetBool("relative")
+	if err != nil && !rc.IsErrParamNotFound(err) {
+		return nil, err
+	}
+
+	// Set expiry
+	var refTime time.Time
+	if !relative {
+		refTime = time.Now()
+	}
+	err = vfs.cache.QueueSetExpiry(writeback.Handle(id), refTime, time.Duration(float64(time.Second)*expiry))
+	return nil, err
 }

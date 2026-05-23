@@ -4,7 +4,6 @@ package makefiles
 
 import (
 	"io"
-	"log"
 	"math"
 	"math/rand"
 	"os"
@@ -31,6 +30,7 @@ var (
 	maxFileSize              = fs.SizeSuffix(100)
 	minFileNameLength        = 4
 	maxFileNameLength        = 12
+	flat                     = false
 	seed                     = int64(1)
 	zero                     = false
 	sparse                   = false
@@ -49,36 +49,46 @@ var (
 func init() {
 	test.Command.AddCommand(makefilesCmd)
 	makefilesFlags := makefilesCmd.Flags()
-	flags.IntVarP(makefilesFlags, &numberOfFiles, "files", "", numberOfFiles, "Number of files to create")
-	flags.IntVarP(makefilesFlags, &averageFilesPerDirectory, "files-per-directory", "", averageFilesPerDirectory, "Average number of files per directory")
-	flags.IntVarP(makefilesFlags, &maxDepth, "max-depth", "", maxDepth, "Maximum depth of directory hierarchy")
-	flags.FVarP(makefilesFlags, &minFileSize, "min-file-size", "", "Minimum size of file to create")
-	flags.FVarP(makefilesFlags, &maxFileSize, "max-file-size", "", "Maximum size of files to create")
-	flags.IntVarP(makefilesFlags, &minFileNameLength, "min-name-length", "", minFileNameLength, "Minimum size of file names")
-	flags.IntVarP(makefilesFlags, &maxFileNameLength, "max-name-length", "", maxFileNameLength, "Maximum size of file names")
+	flags.IntVarP(makefilesFlags, &numberOfFiles, "files", "", numberOfFiles, "Number of files to create", "")
+	flags.IntVarP(makefilesFlags, &averageFilesPerDirectory, "files-per-directory", "", averageFilesPerDirectory, "Average number of files per directory", "")
+	flags.IntVarP(makefilesFlags, &maxDepth, "max-depth", "", maxDepth, "Maximum depth of directory hierarchy", "")
+	flags.FVarP(makefilesFlags, &minFileSize, "min-file-size", "", "Minimum size of file to create", "")
+	flags.FVarP(makefilesFlags, &maxFileSize, "max-file-size", "", "Maximum size of files to create", "")
+	flags.IntVarP(makefilesFlags, &minFileNameLength, "min-name-length", "", minFileNameLength, "Minimum size of file names", "")
+	flags.IntVarP(makefilesFlags, &maxFileNameLength, "max-name-length", "", maxFileNameLength, "Maximum size of file names", "")
+	flags.BoolVarP(makefilesFlags, &flat, "flat", "", false, "If set create all files in the root directory", "")
 
 	test.Command.AddCommand(makefileCmd)
 	makefileFlags := makefileCmd.Flags()
 
-	// Common flags to makefiles and makefile
-	for _, f := range []*pflag.FlagSet{makefilesFlags, makefileFlags} {
-		flags.Int64VarP(f, &seed, "seed", "", seed, "Seed for the random number generator (0 for random)")
-		flags.BoolVarP(f, &zero, "zero", "", zero, "Fill files with ASCII 0x00")
-		flags.BoolVarP(f, &sparse, "sparse", "", sparse, "Make the files sparse (appear to be filled with ASCII 0x00)")
-		flags.BoolVarP(f, &ascii, "ascii", "", ascii, "Fill files with random ASCII printable bytes only")
-		flags.BoolVarP(f, &pattern, "pattern", "", pattern, "Fill files with a periodic pattern")
-		flags.BoolVarP(f, &chargen, "chargen", "", chargen, "Fill files with a ASCII chargen pattern")
-	}
+	addCommonFlags(makefilesFlags)
+	addCommonFlags(makefileFlags)
+}
+
+// Common flags for makefiles and makefile
+func addCommonFlags(f *pflag.FlagSet) {
+	flags.Int64VarP(f, &seed, "seed", "", seed, "Seed for the random number generator (0 for random)", "")
+	flags.BoolVarP(f, &zero, "zero", "", zero, "Fill files with ASCII 0x00", "")
+	flags.BoolVarP(f, &sparse, "sparse", "", sparse, "Make the files sparse (appear to be filled with ASCII 0x00)", "")
+	flags.BoolVarP(f, &ascii, "ascii", "", ascii, "Fill files with random ASCII printable bytes only", "")
+	flags.BoolVarP(f, &pattern, "pattern", "", pattern, "Fill files with a periodic pattern", "")
+	flags.BoolVarP(f, &chargen, "chargen", "", chargen, "Fill files with a ASCII chargen pattern", "")
 }
 
 var makefilesCmd = &cobra.Command{
 	Use:   "makefiles <dir>",
 	Short: `Make a random file hierarchy in a directory`,
+	Annotations: map[string]string{
+		"versionIntroduced": "v1.55",
+	},
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(1, 1, command, args)
 		commonInit()
 		outputDirectory := args[0]
 		directoriesToCreate = numberOfFiles / averageFilesPerDirectory
+		if flat {
+			directoriesToCreate = 0
+		}
 		averageSize := (minFileSize + maxFileSize) / 2
 		start := time.Now()
 		fs.Logf(nil, "Creating %d files of average size %v in %d directories in %q.", numberOfFiles, averageSize, directoriesToCreate, outputDirectory)
@@ -88,7 +98,7 @@ var makefilesCmd = &cobra.Command{
 		}
 		dirs := root.list("", []string{})
 		totalBytes := int64(0)
-		for i := 0; i < numberOfFiles; i++ {
+		for range numberOfFiles {
 			dir := dirs[randSource.Intn(len(dirs))]
 			size := int64(minFileSize)
 			if maxFileSize > minFileSize {
@@ -105,26 +115,33 @@ var makefilesCmd = &cobra.Command{
 var makefileCmd = &cobra.Command{
 	Use:   "makefile <size> [<file>]+ [flags]",
 	Short: `Make files with random contents of the size given`,
+	Annotations: map[string]string{
+		"versionIntroduced": "v1.59",
+	},
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(1, 1e6, command, args)
 		commonInit()
 		var size fs.SizeSuffix
 		err := size.Set(args[0])
 		if err != nil {
-			log.Fatalf("Failed to parse size %q: %v", args[0], err)
+			fs.Fatalf(nil, "Failed to parse size %q: %v", args[0], err)
 		}
-		start := time.Now()
-		fs.Logf(nil, "Creating %d files of size %v.", len(args[1:]), size)
-		totalBytes := int64(0)
-		for _, filePath := range args[1:] {
-			dir := filepath.Dir(filePath)
-			name := filepath.Base(filePath)
-			writeFile(dir, name, int64(size))
-			totalBytes += int64(size)
-		}
-		dt := time.Since(start)
-		fs.Logf(nil, "Written %vB in %v at %vB/s.", fs.SizeSuffix(totalBytes), dt.Round(time.Millisecond), fs.SizeSuffix((totalBytes*int64(time.Second))/int64(dt)))
+		makefiles(size, args[1:])
 	},
+}
+
+func makefiles(size fs.SizeSuffix, files []string) {
+	start := time.Now()
+	fs.Logf(nil, "Creating %d files of size %v.", len(files), size)
+	totalBytes := int64(0)
+	for _, filePath := range files {
+		dir := filepath.Dir(filePath)
+		name := filepath.Base(filePath)
+		writeFile(dir, name, int64(size))
+		totalBytes += int64(size)
+	}
+	dt := time.Since(start)
+	fs.Logf(nil, "Written %vB in %v at %vB/s.", fs.SizeSuffix(totalBytes), dt.Round(time.Millisecond), fs.SizeSuffix((totalBytes*int64(time.Second))/int64(dt)))
 }
 
 func bool2int(b bool) int {
@@ -142,7 +159,7 @@ func commonInit() {
 	}
 	randSource = rand.New(rand.NewSource(seed))
 	if bool2int(zero)+bool2int(sparse)+bool2int(ascii)+bool2int(pattern)+bool2int(chargen) > 1 {
-		log.Fatal("Can only supply one of --zero, --sparse, --ascii, --pattern or --chargen")
+		fs.Fatal(nil, "Can only supply one of --zero, --sparse, --ascii, --pattern or --chargen")
 	}
 	switch {
 	case zero, sparse:
@@ -218,7 +235,7 @@ func (r *chargenReader) Read(p []byte) (n int, err error) {
 func fileName() (name string) {
 	for {
 		length := randSource.Intn(maxFileNameLength-minFileNameLength) + minFileNameLength
-		name = random.StringFn(length, randSource.Intn)
+		name = random.StringFn(length, randSource)
 		if _, found := fileNames[name]; !found {
 			break
 		}
@@ -254,7 +271,6 @@ func (d *dir) createDirectories() {
 			return
 		}
 	}
-	return
 }
 
 // list the directory hierarchy
@@ -271,12 +287,12 @@ func (d *dir) list(path string, output []string) []string {
 func writeFile(dir, name string, size int64) {
 	err := file.MkdirAll(dir, 0777)
 	if err != nil {
-		log.Fatalf("Failed to make directory %q: %v", dir, err)
+		fs.Fatalf(nil, "Failed to make directory %q: %v", dir, err)
 	}
 	path := filepath.Join(dir, name)
 	fd, err := os.Create(path)
 	if err != nil {
-		log.Fatalf("Failed to open file %q: %v", path, err)
+		fs.Fatalf(nil, "Failed to open file %q: %v", path, err)
 	}
 	if sparse {
 		err = fd.Truncate(size)
@@ -284,11 +300,11 @@ func writeFile(dir, name string, size int64) {
 		_, err = io.CopyN(fd, source, size)
 	}
 	if err != nil {
-		log.Fatalf("Failed to write %v bytes to file %q: %v", size, path, err)
+		fs.Fatalf(nil, "Failed to write %v bytes to file %q: %v", size, path, err)
 	}
 	err = fd.Close()
 	if err != nil {
-		log.Fatalf("Failed to close file %q: %v", path, err)
+		fs.Fatalf(nil, "Failed to close file %q: %v", path, err)
 	}
 	fs.Infof(path, "Written file size %v", fs.SizeSuffix(size))
 }

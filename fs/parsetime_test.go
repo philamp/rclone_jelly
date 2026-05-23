@@ -10,8 +10,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Check it satisfies the interface
-var _ flagger = (*Time)(nil)
+// Check it satisfies the interfaces
+var (
+	_ Flagger   = (*Time)(nil)
+	_ FlaggerNP = Time{}
+)
 
 func TestParseTime(t *testing.T) {
 	now := time.Date(2020, 9, 5, 8, 15, 5, 250, time.UTC)
@@ -93,15 +96,23 @@ func TestTimeScan(t *testing.T) {
 	timeNowFunc = func() time.Time { return now }
 	defer func() { timeNowFunc = oldTimeNowFunc }()
 
-	var v1, v2, v3, v4, v5 Time
-	n, err := fmt.Sscan(" 17m -12h 0 off 2022-03-26T17:48:19Z ", &v1, &v2, &v3, &v4, &v5)
-	require.NoError(t, err)
-	assert.Equal(t, 5, n)
-	assert.Equal(t, Time(now.Add(-17*time.Minute)), v1)
-	assert.Equal(t, Time(now.Add(12*time.Hour)), v2)
-	assert.Equal(t, Time(now), v3)
-	assert.Equal(t, Time(time.Time{}), v4)
-	assert.Equal(t, Time(time.Date(2022, 03, 26, 17, 48, 19, 0, time.UTC)), v5)
+	for _, test := range []struct {
+		in   string
+		want Time
+	}{
+		{"17m", Time(now.Add(-17 * time.Minute))},
+		{"-12h", Time(now.Add(12 * time.Hour))},
+		{"0", Time(now)},
+		{"off", Time(time.Time{})},
+		{"2022-03-26T17:48:19Z", Time(time.Date(2022, 03, 26, 17, 48, 19, 0, time.UTC))},
+		{"2022-03-26 17:48:19", Time(time.Date(2022, 03, 26, 17, 48, 19, 0, time.Local))},
+	} {
+		var got Time
+		n, err := fmt.Sscan(test.in, &got)
+		require.NoError(t, err)
+		assert.Equal(t, 1, n)
+		assert.Equal(t, test.want, got)
+	}
 }
 
 func TestParseTimeUnmarshalJSON(t *testing.T) {
@@ -143,5 +154,25 @@ func TestParseTimeUnmarshalJSON(t *testing.T) {
 			require.NoError(t, err, test.in)
 		}
 		assert.Equal(t, Time(test.want), parsedTime, test.in)
+	}
+}
+
+func TestParseTimeMarshalJSON(t *testing.T) {
+	for _, test := range []struct {
+		in   time.Time
+		want string
+		err  bool
+	}{
+		{time.Time{}, `"0001-01-01T00:00:00Z"`, false},
+		{time.Date(2022, 03, 26, 17, 48, 19, 0, time.UTC), `"2022-03-26T17:48:19Z"`, false},
+	} {
+		gotBytes, err := json.Marshal(test.in)
+		got := string(gotBytes)
+		if test.err {
+			require.Error(t, err, test.in)
+		} else {
+			require.NoError(t, err, test.in)
+		}
+		assert.Equal(t, test.want, got, test.in)
 	}
 }

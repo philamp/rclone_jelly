@@ -8,14 +8,12 @@ import (
 
 func init() {
 	for _, name := range []string{"sync", "copy", "move"} {
-		name := name
 		moveHelp := ""
 		if name == "move" {
 			moveHelp = "- deleteEmptySrcDirs - delete empty src directories if set\n"
 		}
 		rc.Add(rc.Call{
-			Path:         "sync/" + name,
-			AuthRequired: true,
+			Path: "sync/" + name,
 			Fn: func(ctx context.Context, in rc.Params) (rc.Params, error) {
 				return rcSyncCopyMove(ctx, in, name)
 			},
@@ -27,7 +25,7 @@ func init() {
 - createEmptySrcDirs - create empty src directories on destination if set
 ` + moveHelp + `
 
-See the [` + name + ` command](/commands/rclone_` + name + `/) command for more information on the above.`,
+See the [` + name + `](/commands/rclone_` + name + `/) command for more information on the above.`,
 		})
 	}
 }

@@ -5,10 +5,10 @@ description: "Rclone Licence"
 
 # License
 
-This is free software under the terms of MIT the license (check the
+This is free software under the terms of the MIT license (check the
 COPYING file included with the source code).
 
-```
+```text
 Copyright (C) 2019 by Nick Craig-Wood https://www.craig-wood.com/nick/
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -29,4 +29,3 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
-

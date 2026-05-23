@@ -4,7 +4,6 @@
 // We skip tests on platforms with troublesome character mappings
 
 //go:build !windows && !darwin && !plan9
-// +build !windows,!darwin,!plan9
 
 package ftp
 
@@ -13,12 +12,15 @@ import (
 	"testing"
 
 	_ "github.com/rclone/rclone/backend/local"
+	"github.com/rclone/rclone/cmd/serve/proxy"
 	"github.com/rclone/rclone/cmd/serve/servetest"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/obscure"
+	"github.com/rclone/rclone/fs/rc"
+	"github.com/rclone/rclone/lib/israce"
+	"github.com/rclone/rclone/vfs/vfscommon"
 	"github.com/stretchr/testify/assert"
-	ftp "goftp.io/server/core"
 )
 
 const (
@@ -34,22 +36,19 @@ const (
 func TestFTP(t *testing.T) {
 	// Configure and start the server
 	start := func(f fs.Fs) (configmap.Simple, func()) {
-		opt := DefaultOpt
+		opt := Opt
 		opt.ListenAddr = testHOST + ":" + testPORT
 		opt.PassivePorts = testPASSIVEPORTRANGE
-		opt.BasicUser = testUSER
-		opt.BasicPass = testPASS
+		opt.User = testUSER
+		opt.Pass = testPASS
 
-		w, err := newServer(context.Background(), f, &opt)
+		w, err := newServer(context.Background(), f, &opt, &vfscommon.Opt, &proxy.Opt)
 		assert.NoError(t, err)
 
 		quit := make(chan struct{})
 		go func() {
-			err := w.serve()
+			assert.NoError(t, w.Serve())
 			close(quit)
-			if err != ftp.ErrServerClosed {
-				assert.NoError(t, err)
-			}
 		}()
 
 		// Config for the backend we'll use to connect to the server
@@ -62,11 +61,21 @@ func TestFTP(t *testing.T) {
 		}
 
 		return config, func() {
-			err := w.close()
+			err := w.Shutdown()
 			assert.NoError(t, err)
 			<-quit
 		}
 	}
 
 	servetest.Run(t, "ftp", start)
+}
+
+func TestRc(t *testing.T) {
+	if israce.Enabled {
+		t.Skip("Skipping under race detector as underlying library is racy")
+	}
+	servetest.TestRc(t, rc.Params{
+		"type":           "ftp",
+		"vfs_cache_mode": "off",
+	})
 }

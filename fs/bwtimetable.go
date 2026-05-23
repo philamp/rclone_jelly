@@ -29,16 +29,16 @@ func (bp *BwPair) String() string {
 // Set the bandwidth from a string which is either
 // SizeSuffix or SizeSuffix:SizeSuffix (for tx:rx bandwidth)
 func (bp *BwPair) Set(s string) (err error) {
-	colon := strings.Index(s, ":")
+	before, after, ok := strings.Cut(s, ":")
 	stx, srx := s, ""
-	if colon >= 0 {
-		stx, srx = s[:colon], s[colon+1:]
+	if ok {
+		stx, srx = before, after
 	}
 	err = bp.Tx.Set(stx)
 	if err != nil {
 		return err
 	}
-	if colon < 0 {
+	if !ok {
 		bp.Rx = bp.Tx
 	} else {
 		err = bp.Rx.Set(srx)
@@ -90,14 +90,14 @@ func validateHour(HHMM string) error {
 		return fmt.Errorf("invalid hour in time specification %q: %v", HHMM, err)
 	}
 	if hh < 0 || hh > 23 {
-		return fmt.Errorf("invalid hour (must be between 00 and 23): %q", hh)
+		return fmt.Errorf("invalid hour (must be between 00 and 23): %d", hh)
 	}
 	mm, err := strconv.Atoi(HHMM[3:])
 	if err != nil {
 		return fmt.Errorf("invalid minute in time specification: %q: %v", HHMM, err)
 	}
 	if mm < 0 || mm > 59 {
-		return fmt.Errorf("invalid minute (must be between 00 and 59): %q", hh)
+		return fmt.Errorf("invalid minute (must be between 00 and 59): %d", mm)
 	}
 	return nil
 }
@@ -150,7 +150,10 @@ func (x *BwTimetable) Set(s string) error {
 		return nil
 	}
 
-	for _, tok := range strings.Split(s, " ") {
+	// Split the timetable string by both spaces and semicolons
+	for tok := range strings.FieldsFuncSeq(s, func(r rune) bool {
+		return r == ' ' || r == ';'
+	}) {
 		tv := strings.Split(tok, ",")
 
 		// Format must be dayOfWeek-HH:MM,BW
@@ -165,7 +168,7 @@ func (x *BwTimetable) Set(s string) error {
 			if err := validateHour(HHMM); err != nil {
 				return err
 			}
-			for i := 0; i < 7; i++ {
+			for i := range 7 {
 				hh, _ := strconv.Atoi(HHMM[0:2])
 				mm, _ := strconv.Atoi(HHMM[3:])
 				ts := BwTimeSlot{
@@ -208,7 +211,7 @@ func (x *BwTimetable) Set(s string) error {
 	return nil
 }
 
-//	Difference in minutes between lateDayOfWeekHHMM and earlyDayOfWeekHHMM
+// Difference in minutes between lateDayOfWeekHHMM and earlyDayOfWeekHHMM
 func timeDiff(lateDayOfWeekHHMM int, earlyDayOfWeekHHMM int) int {
 
 	lateTimeMinutes := (lateDayOfWeekHHMM / 10000) * 24 * 60

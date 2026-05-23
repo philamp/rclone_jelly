@@ -12,10 +12,10 @@ import (
 	"fmt"
 	gohash "hash"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,7 +28,7 @@ import (
 	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
-	"github.com/rclone/rclone/fs/walk"
+	"github.com/rclone/rclone/fs/list"
 	"github.com/rclone/rclone/lib/pacer"
 	"github.com/rclone/rclone/lib/rest"
 )
@@ -66,11 +66,13 @@ HTTP is provided primarily for debugging purposes.`,
 			Help: `Domain+path of NetStorage host to connect to.
 
 Format should be ` + "`<domain>/<internal folders>`",
-			Required: true,
+			Required:  true,
+			Sensitive: true,
 		}, {
-			Name:     "account",
-			Help:     "Set the NetStorage account name",
-			Required: true,
+			Name:      "account",
+			Help:      "Set the NetStorage account name",
+			Required:  true,
+			Sensitive: true,
 		}, {
 			Name: "secret",
 			Help: `Set the NetStorage account secret/G2O key for authentication.
@@ -85,7 +87,7 @@ Please choose the 'y' option to set your own password then enter your secret.`,
 
 var commandHelp = []fs.CommandHelp{{
 	Name:  "du",
-	Short: "Return disk usage information for a specified directory",
+	Short: "Return disk usage information for a specified directory.",
 	Long: `The usage information returned, includes the targeted directory as well as all
 files stored in any sub-directories that may exist.`,
 }, {
@@ -94,7 +96,12 @@ files stored in any sub-directories that may exist.`,
 	Long: `The desired path location (including applicable sub-directories) ending in
 the object that will be the target of the symlink (for example, /links/mylink).
 Include the file extension for the object, if applicable.
-` + "`rclone backend symlink <src> <path>`",
+
+Usage example:
+
+` + "```console" + `
+rclone backend symlink <src> <path>
+` + "```",
 },
 }
 
@@ -118,7 +125,7 @@ type Fs struct {
 	filetype         string            // dir, file or symlink
 	dirscreated      map[string]bool   // if implicit dir has been created already
 	dirscreatedMutex sync.Mutex        // mutex to protect dirscreated
-	statcache        map[string][]File // cache successfull stat requests
+	statcache        map[string][]File // cache successful stat requests
 	statcacheMutex   sync.RWMutex      // RWMutex to protect statcache
 }
 
@@ -259,6 +266,11 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	case fs.ErrorObjectNotFound:
 		return f, nil
 	case fs.ErrorIsFile:
+		// Correct root if definitely pointing to a file
+		f.root = path.Dir(f.root)
+		if f.root == "." || f.root == "/" {
+			f.root = ""
+		}
 		// Fs points to the parent directory
 		return f, err
 	default:
@@ -267,7 +279,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 }
 
 // Command the backend to run a named commands: du and symlink
-func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[string]string) (out interface{}, err error) {
+func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[string]string) (out any, err error) {
 	switch name {
 	case "du":
 		// No arg parsing needed, the path is passed in the fs
@@ -424,7 +436,7 @@ func (f *Fs) getFileName(file *File) string {
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
 	if f.filetype == "" {
 		// This happens in two scenarios.
-		// 1. NewFs is done on a non-existent object, then later rclone attempts to List/ListR this NewFs.
+		// 1. NewFs is done on a nonexistent object, then later rclone attempts to List/ListR this NewFs.
 		// 2. List/ListR is called from the context of test_all and not the regular rclone binary.
 		err := f.initFs(ctx, dir)
 		if err != nil {
@@ -436,7 +448,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 	}
 
 	URL := f.url(dir)
-	files, err := f.netStorageDirRequest(ctx, dir, URL)
+	files, err := f.netStorageDirRequest(ctx, URL)
 	if err != nil {
 		return nil, err
 	}
@@ -488,7 +500,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (err error) {
 	if f.filetype == "" {
 		// This happens in two scenarios.
-		// 1. NewFs is done on a non-existent object, then later rclone attempts to List/ListR this NewFs.
+		// 1. NewFs is done on a nonexistent object, then later rclone attempts to List/ListR this NewFs.
 		// 2. List/ListR is called from the context of test_all and not the regular rclone binary.
 		err := f.initFs(ctx, dir)
 		if err != nil {
@@ -509,7 +521,7 @@ func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (
 		return fs.ErrorDirNotFound
 	}
 
-	list := walk.NewListRHelper(callback)
+	list := list.NewHelper(callback)
 	for resumeStart := u.Path; resumeStart != ""; {
 		var files []File
 		files, resumeStart, err = f.netStorageListRequest(ctx, URL, u.Path)
@@ -820,6 +832,8 @@ func (f *Fs) getAuth(req *http.Request) error {
 	// Set Authorization header
 	dataHeader := generateDataHeader(f)
 	path := req.URL.RequestURI()
+	//lint:ignore SA1008 false positive when running staticcheck, the header name is according to docs even if not canonical
+	//nolint:staticcheck // Don't include staticcheck when running golangci-lint to avoid SA1008
 	actionHeader := req.Header["X-Akamai-ACS-Action"][0]
 	fs.Debugf(nil, "NetStorage API %s call %s for path %q", req.Method, actionHeader, path)
 	req.Header.Set("X-Akamai-ACS-Auth-Data", dataHeader)
@@ -849,7 +863,7 @@ func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, err
 
 // callBackend calls NetStorage API using either rest.Call or rest.CallXML function,
 // depending on whether the response is required
-func (f *Fs) callBackend(ctx context.Context, URL, method, actionHeader string, noResponse bool, response interface{}, options []fs.OpenOption) (io.ReadCloser, error) {
+func (f *Fs) callBackend(ctx context.Context, URL, method, actionHeader string, noResponse bool, response any, options []fs.OpenOption) (io.ReadCloser, error) {
 	opts := rest.Opts{
 		Method:     method,
 		RootURL:    URL,
@@ -903,29 +917,25 @@ func (f *Fs) netStorageStatRequest(ctx context.Context, URL string, directory bo
 		files = statResp.Files
 		f.setStatCache(URL, files)
 	}
-	if files != nil {
-		// Multiple objects can be returned with the "slash=both" option,
-		// when file/symlink/directory has the same name
-		for i := range files {
-			if files[i].Type == "symlink" {
-				// Add .rclonelink suffix to allow local backend code to convert to a symlink.
-				files[i].Name += ".rclonelink"
-				fs.Infof(nil, "Converting a symlink to the rclonelink on the stat request %s", files[i].Name)
-			}
-			entrywanted := (directory && files[i].Type == "dir") ||
-				(!directory && files[i].Type != "dir")
-			if entrywanted {
-				filestamp := files[0]
-				files[0] = files[i]
-				files[i] = filestamp
-			}
+	// Multiple objects can be returned with the "slash=both" option,
+	// when file/symlink/directory has the same name
+	for i := range files {
+		if files[i].Type == "symlink" {
+			// Add .rclonelink suffix to allow local backend code to convert to a symlink.
+			files[i].Name += ".rclonelink"
+			fs.Infof(nil, "Converting a symlink to the rclonelink on the stat request %s", files[i].Name)
+		}
+		entrywanted := (directory && files[i].Type == "dir") ||
+			(!directory && files[i].Type != "dir")
+		if entrywanted {
+			files[0], files[i] = files[i], files[0]
 		}
 	}
 	return files, nil
 }
 
 // netStorageDirRequest performs a NetStorage dir request
-func (f *Fs) netStorageDirRequest(ctx context.Context, dir string, URL string) ([]File, error) {
+func (f *Fs) netStorageDirRequest(ctx context.Context, URL string) ([]File, error) {
 	const actionHeader = "version=1&action=dir&format=xml&encoding=utf-8"
 	statResp := &Stat{}
 	if _, err := f.callBackend(ctx, URL, "GET", actionHeader, false, statResp, nil); err != nil {
@@ -974,7 +984,7 @@ func (o *Object) netStorageUploadRequest(ctx context.Context, in io.Reader, src 
 		URL = o.fs.url(src.Remote())
 	}
 	if strings.HasSuffix(URL, ".rclonelink") {
-		bits, err := ioutil.ReadAll(in)
+		bits, err := io.ReadAll(in)
 		if err != nil {
 			return err
 		}
@@ -1060,7 +1070,7 @@ func (o *Object) netStorageDownloadRequest(ctx context.Context, options []fs.Ope
 	if strings.HasSuffix(URL, ".rclonelink") && o.target != "" {
 		fs.Infof(nil, "Converting a symlink to the rclonelink file on download %q", URL)
 		reader := strings.NewReader(o.target)
-		readcloser := ioutil.NopCloser(reader)
+		readcloser := io.NopCloser(reader)
 		return readcloser, nil
 	}
 
@@ -1075,7 +1085,7 @@ func (o *Object) netStorageDownloadRequest(ctx context.Context, options []fs.Ope
 }
 
 // netStorageDuRequest performs a NetStorage du request
-func (f *Fs) netStorageDuRequest(ctx context.Context) (interface{}, error) {
+func (f *Fs) netStorageDuRequest(ctx context.Context) (any, error) {
 	URL := f.url("")
 	const actionHeader = "version=1&action=du&format=xml&encoding=utf-8"
 	duResp := &Du{}
@@ -1095,7 +1105,7 @@ func (f *Fs) netStorageDuRequest(ctx context.Context) (interface{}, error) {
 }
 
 // netStorageDuRequest performs a NetStorage symlink request
-func (f *Fs) netStorageSymlinkRequest(ctx context.Context, URL string, dst string, modTime *int64) (interface{}, error) {
+func (f *Fs) netStorageSymlinkRequest(ctx context.Context, URL string, dst string, modTime *int64) (any, error) {
 	target := url.QueryEscape(strings.TrimSuffix(dst, "/"))
 	actionHeader := "version=1&action=symlink&target=" + target
 	if modTime != nil {

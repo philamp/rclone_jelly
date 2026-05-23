@@ -18,6 +18,7 @@ import (
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/fspath"
 	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fs/list"
 	"github.com/rclone/rclone/lib/kv"
 )
 
@@ -27,6 +28,9 @@ func init() {
 		Name:        "hasher",
 		Description: "Better checksums for other remotes",
 		NewFs:       NewFs,
+		MetadataInfo: &fs.MetadataInfo{
+			Help: `Any metadata supported by the underlying remote is read and written.`,
+		},
 		CommandHelp: commandHelp,
 		Options: []fs.Option{{
 			Name:     "remote",
@@ -111,6 +115,13 @@ func NewFs(ctx context.Context, fsname, rpath string, cmap configmap.Mapper) (fs
 		root: rpath,
 		opt:  opt,
 	}
+	// Correct root if definitely pointing to a file
+	if err == fs.ErrorIsFile {
+		f.root = path.Dir(f.root)
+		if f.root == "." || f.root == "/" {
+			f.root = ""
+		}
+	}
 	baseFeatures := baseFs.Features()
 	f.fpTime = baseFs.Precision() != fs.ModTimeNotSupported
 
@@ -154,12 +165,26 @@ func NewFs(ctx context.Context, fsname, rpath string, cmap configmap.Mapper) (fs
 	}
 
 	stubFeatures := &fs.Features{
-		CanHaveEmptyDirectories: true,
-		IsLocal:                 true,
-		ReadMimeType:            true,
-		WriteMimeType:           true,
+		CanHaveEmptyDirectories:  true,
+		IsLocal:                  true,
+		ReadMimeType:             true,
+		WriteMimeType:            true,
+		SetTier:                  true,
+		GetTier:                  true,
+		ReadMetadata:             true,
+		WriteMetadata:            true,
+		UserMetadata:             true,
+		ReadDirMetadata:          true,
+		WriteDirMetadata:         true,
+		WriteDirSetModTime:       true,
+		UserDirMetadata:          true,
+		DirModTimeUpdatesOnWrite: true,
+		PartialUploads:           true,
 	}
 	f.features = stubFeatures.Fill(ctx, f).Mask(ctx, f.Fs).WrapsFs(f, f.Fs)
+
+	// Enable ListP always
+	f.features.ListP = f.ListP
 
 	cache.PinUntilFinalized(f.Fs, f)
 	return f, err
@@ -216,10 +241,39 @@ func (f *Fs) wrapEntries(baseEntries fs.DirEntries) (hashEntries fs.DirEntries, 
 
 // List the objects and directories in dir into entries.
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
-	if entries, err = f.Fs.List(ctx, dir); err != nil {
-		return nil, err
+	return list.WithListP(ctx, dir, f)
+}
+
+// ListP lists the objects and directories of the Fs starting
+// from dir non recursively into out.
+//
+// dir should be "" to start from the root, and should not
+// have trailing slashes.
+//
+// This should return ErrDirNotFound if the directory isn't
+// found.
+//
+// It should call callback for each tranche of entries read.
+// These need not be returned in any particular order.  If
+// callback returns an error then the listing will stop
+// immediately.
+func (f *Fs) ListP(ctx context.Context, dir string, callback fs.ListRCallback) error {
+	wrappedCallback := func(entries fs.DirEntries) error {
+		entries, err := f.wrapEntries(entries)
+		if err != nil {
+			return err
+		}
+		return callback(entries)
 	}
-	return f.wrapEntries(entries)
+	listP := f.Fs.Features().ListP
+	if listP == nil {
+		entries, err := f.Fs.List(ctx, dir)
+		if err != nil {
+			return err
+		}
+		return wrappedCallback(entries)
+	}
+	return listP(ctx, dir, wrappedCallback)
 }
 
 // ListR lists the objects and directories recursively into out.
@@ -325,6 +379,22 @@ func (f *Fs) MergeDirs(ctx context.Context, dirs []fs.Directory) error {
 	return errors.New("MergeDirs not supported")
 }
 
+// DirSetModTime sets the directory modtime for dir
+func (f *Fs) DirSetModTime(ctx context.Context, dir string, modTime time.Time) error {
+	if do := f.Fs.Features().DirSetModTime; do != nil {
+		return do(ctx, dir, modTime)
+	}
+	return fs.ErrorNotImplemented
+}
+
+// MkdirMetadata makes the root directory of the Fs object
+func (f *Fs) MkdirMetadata(ctx context.Context, dir string, metadata fs.Metadata) (fs.Directory, error) {
+	if do := f.Fs.Features().MkdirMetadata; do != nil {
+		return do(ctx, dir, metadata)
+	}
+	return nil, fs.ErrorNotImplemented
+}
+
 // DirCacheFlush resets the directory cache - used in testing
 // as an optional interface
 func (f *Fs) DirCacheFlush() {
@@ -402,7 +472,9 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 
 // Shutdown the backend, closing any background tasks and any cached connections.
 func (f *Fs) Shutdown(ctx context.Context) (err error) {
-	err = f.db.Stop(false)
+	if f.db != nil && !f.db.IsStopped() {
+		err = f.db.Stop(false)
+	}
 	if do := f.Fs.Features().Shutdown; do != nil {
 		if err2 := do(ctx); err2 != nil {
 			err = err2
@@ -485,6 +557,28 @@ func (o *Object) MimeType(ctx context.Context) string {
 	return ""
 }
 
+// Metadata returns metadata for an object
+//
+// It should return nil if there is no Metadata
+func (o *Object) Metadata(ctx context.Context) (fs.Metadata, error) {
+	do, ok := o.Object.(fs.Metadataer)
+	if !ok {
+		return nil, nil
+	}
+	return do.Metadata(ctx)
+}
+
+// SetMetadata sets metadata for an Object
+//
+// It should return fs.ErrorNotImplemented if it can't set metadata
+func (o *Object) SetMetadata(ctx context.Context, metadata fs.Metadata) error {
+	do, ok := o.Object.(fs.SetMetadataer)
+	if !ok {
+		return fs.ErrorNotImplemented
+	}
+	return do.SetMetadata(ctx, metadata)
+}
+
 // Check the interfaces are satisfied
 var (
 	_ fs.Fs              = (*Fs)(nil)
@@ -501,16 +595,13 @@ var (
 	_ fs.Abouter         = (*Fs)(nil)
 	_ fs.Wrapper         = (*Fs)(nil)
 	_ fs.MergeDirser     = (*Fs)(nil)
+	_ fs.DirSetModTimer  = (*Fs)(nil)
+	_ fs.MkdirMetadataer = (*Fs)(nil)
 	_ fs.DirCacheFlusher = (*Fs)(nil)
 	_ fs.ChangeNotifier  = (*Fs)(nil)
 	_ fs.PublicLinker    = (*Fs)(nil)
 	_ fs.UserInfoer      = (*Fs)(nil)
 	_ fs.Disconnecter    = (*Fs)(nil)
 	_ fs.Shutdowner      = (*Fs)(nil)
-	_ fs.Object          = (*Object)(nil)
-	_ fs.ObjectUnWrapper = (*Object)(nil)
-	_ fs.IDer            = (*Object)(nil)
-	_ fs.SetTierer       = (*Object)(nil)
-	_ fs.GetTierer       = (*Object)(nil)
-	_ fs.MimeTyper       = (*Object)(nil)
+	_ fs.FullObject      = (*Object)(nil)
 )

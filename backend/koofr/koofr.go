@@ -1,3 +1,4 @@
+// Package koofr provides an interface to the Koofr storage system.
 package koofr
 
 import (
@@ -60,18 +61,19 @@ func init() {
 			Default:  true,
 			Advanced: true,
 		}, {
-			Name:     "user",
-			Help:     "Your user name.",
-			Required: true,
+			Name:      "user",
+			Help:      "Your user name.",
+			Required:  true,
+			Sensitive: true,
 		}, {
 			Name:       "password",
-			Help:       "Your password for rclone (generate one at https://app.koofr.net/app/admin/preferences/password).",
+			Help:       "Your password for rclone generate one at https://app.koofr.net/app/admin/preferences/password.",
 			Provider:   "koofr",
 			IsPassword: true,
 			Required:   true,
 		}, {
 			Name:       "password",
-			Help:       "Your password for rclone (generate one at https://storage.rcs-rds.ro/app/admin/preferences/password).",
+			Help:       "Your password for rclone generate one at https://storage.rcs-rds.ro/app/admin/preferences/password.",
 			Provider:   "digistorage",
 			IsPassword: true,
 			Required:   true,
@@ -351,9 +353,9 @@ func NewFsFromOptions(ctx context.Context, name, root string, opt *Options) (ff 
 	}
 	if f.mountID == "" {
 		if opt.MountID == "" {
-			return nil, errors.New("Failed to find primary mount")
+			return nil, errors.New("failed to find primary mount")
 		}
-		return nil, errors.New("Failed to find mount " + opt.MountID)
+		return nil, errors.New("failed to find mount " + opt.MountID)
 	}
 	rootFile, err := f.client.FilesInfo(f.mountID, f.opt.Enc.FromStandardPath("/"+f.root))
 	if err == nil && rootFile.Type != "dir" {
@@ -375,7 +377,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 	for i, file := range files {
 		remote := path.Join(dir, f.opt.Enc.ToStandardName(file.Name))
 		if file.Type == "dir" {
-			entries[i] = fs.NewDir(remote, time.Unix(0, 0))
+			entries[i] = fs.NewDir(remote, time.Time{})
 		} else {
 			entries[i] = &Object{
 				fs:     f,
@@ -459,7 +461,7 @@ func translateErrorsDir(err error) error {
 	return err
 }
 
-// translatesErrorsObject translates Koofr errors to rclone errors (for an object operation)
+// translateErrorsObject translates Koofr errors to rclone errors (for an object operation)
 func translateErrorsObject(err error) error {
 	switch err := err.(type) {
 	case httpclient.InvalidStatusError:
@@ -667,7 +669,7 @@ func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, 
 	//
 	// https://app.koofr.net/content/links/39a6cc01-3b23-477a-8059-c0fb3b0f15de/files/get?path=%2F
 	//
-	// I am not sure about meaning of "path" parameter; in my expriments
+	// I am not sure about meaning of "path" parameter; in my experiments
 	// it is always "%2F", and omitting it or putting any other value
 	// results in 404.
 	//

@@ -14,23 +14,26 @@ import (
 	"github.com/rclone/rclone/fstest/fstests"
 )
 
+var defaultOpt = fstests.Opt{
+	RemoteName: "TestCompress:",
+	NilObject:  (*Object)(nil),
+	UnimplementableFsMethods: []string{
+		"OpenWriterAt",
+		"OpenChunkWriter",
+		"MergeDirs",
+		"DirCacheFlush",
+		"PutUnchecked",
+		"PutStream",
+		"UserInfo",
+		"Disconnect",
+	},
+	TiersToTest:                  []string{"STANDARD", "STANDARD_IA"},
+	UnimplementableObjectMethods: []string{},
+}
+
 // TestIntegration runs integration tests against the remote
 func TestIntegration(t *testing.T) {
-	opt := fstests.Opt{
-		RemoteName: *fstest.RemoteName,
-		NilObject:  (*Object)(nil),
-		UnimplementableFsMethods: []string{
-			"OpenWriterAt",
-			"MergeDirs",
-			"DirCacheFlush",
-			"PutUnchecked",
-			"PutStream",
-			"UserInfo",
-			"Disconnect",
-		},
-		TiersToTest:                  []string{"STANDARD", "STANDARD_IA"},
-		UnimplementableObjectMethods: []string{}}
-	fstests.Run(t, &opt)
+	fstests.Run(t, &defaultOpt)
 }
 
 // TestRemoteGzip tests GZIP compression
@@ -40,26 +43,33 @@ func TestRemoteGzip(t *testing.T) {
 	}
 	tempdir := filepath.Join(os.TempDir(), "rclone-compress-test-gzip")
 	name := "TestCompressGzip"
-	fstests.Run(t, &fstests.Opt{
-		RemoteName: name + ":",
-		NilObject:  (*Object)(nil),
-		UnimplementableFsMethods: []string{
-			"OpenWriterAt",
-			"MergeDirs",
-			"DirCacheFlush",
-			"PutUnchecked",
-			"PutStream",
-			"UserInfo",
-			"Disconnect",
-		},
-		UnimplementableObjectMethods: []string{
-			"GetTier",
-			"SetTier",
-		},
-		ExtraConfig: []fstests.ExtraConfigItem{
-			{Name: name, Key: "type", Value: "compress"},
-			{Name: name, Key: "remote", Value: tempdir},
-			{Name: name, Key: "compression_mode", Value: "gzip"},
-		},
-	})
+	opt := defaultOpt
+	opt.RemoteName = name + ":"
+	opt.ExtraConfig = []fstests.ExtraConfigItem{
+		{Name: name, Key: "type", Value: "compress"},
+		{Name: name, Key: "remote", Value: tempdir},
+		{Name: name, Key: "mode", Value: "gzip"},
+		{Name: name, Key: "level", Value: "-1"},
+	}
+	opt.QuickTestOK = true
+	fstests.Run(t, &opt)
+}
+
+// TestRemoteZstd tests ZSTD compression
+func TestRemoteZstd(t *testing.T) {
+	if *fstest.RemoteName != "" {
+		t.Skip("Skipping as -remote set")
+	}
+	tempdir := filepath.Join(os.TempDir(), "rclone-compress-test-zstd")
+	name := "TestCompressZstd"
+	opt := defaultOpt
+	opt.RemoteName = name + ":"
+	opt.ExtraConfig = []fstests.ExtraConfigItem{
+		{Name: name, Key: "type", Value: "compress"},
+		{Name: name, Key: "remote", Value: tempdir},
+		{Name: name, Key: "mode", Value: "zstd"},
+		{Name: name, Key: "level", Value: "2"},
+	}
+	opt.QuickTestOK = true
+	fstests.Run(t, &opt)
 }

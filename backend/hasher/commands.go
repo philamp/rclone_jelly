@@ -24,7 +24,7 @@ import (
 // The result should be capable of being JSON encoded
 // If it is a string or a []string it will be shown to the user
 // otherwise it will be JSON encoded and shown to the user like that
-func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[string]string) (out interface{}, err error) {
+func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[string]string) (out any, err error) {
 	switch name {
 	case "drop":
 		return nil, f.db.Stop(true)
@@ -43,33 +43,42 @@ func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[str
 
 var commandHelp = []fs.CommandHelp{{
 	Name:  "drop",
-	Short: "Drop cache",
+	Short: "Drop cache.",
 	Long: `Completely drop checksum cache.
-Usage Example:
-    rclone backend drop hasher:
-`,
+
+Usage example:
+
+` + "```console" + `
+rclone backend drop hasher:
+` + "```",
 }, {
 	Name:  "dump",
-	Short: "Dump the database",
-	Long:  "Dump cache records covered by the current remote",
+	Short: "Dump the database.",
+	Long:  "Dump cache records covered by the current remote.",
 }, {
 	Name:  "fulldump",
-	Short: "Full dump of the database",
-	Long:  "Dump all cache records in the database",
+	Short: "Full dump of the database.",
+	Long:  "Dump all cache records in the database.",
 }, {
 	Name:  "import",
-	Short: "Import a SUM file",
+	Short: "Import a SUM file.",
 	Long: `Amend hash cache from a SUM file and bind checksums to files by size/time.
-Usage Example:
-    rclone backend import hasher:subdir md5 /path/to/sum.md5
-`,
+
+Usage example:
+
+` + "```console" + `
+rclone backend import hasher:subdir md5 /path/to/sum.md5
+` + "```",
 }, {
 	Name:  "stickyimport",
-	Short: "Perform fast import of a SUM file",
+	Short: "Perform fast import of a SUM file.",
 	Long: `Fill hash cache from a SUM file without verifying file fingerprints.
-Usage Example:
-    rclone backend stickyimport hasher:subdir md5 remote:path/to/sum.md5
-`,
+
+Usage example:
+
+` + "```console" + `
+rclone backend stickyimport hasher:subdir md5 remote:path/to/sum.md5
+` + "```",
 }}
 
 func (f *Fs) dbDump(ctx context.Context, full bool, root string) error {
@@ -79,6 +88,14 @@ func (f *Fs) dbDump(ctx context.Context, full bool, root string) error {
 			return err
 		}
 		root = fspath.JoinRootPath(remoteFs.Root(), f.Root())
+	}
+	if f.db == nil {
+		if f.opt.MaxAge == 0 {
+			fs.Errorf(f, "db not found. (disabled with max_age = 0)")
+		} else {
+			fs.Errorf(f, "db not found.")
+		}
+		return kv.ErrInactive
 	}
 	op := &kvDump{
 		full: full,
@@ -161,7 +178,7 @@ func (f *Fs) dbImport(ctx context.Context, hashName, sumRemote string, sticky bo
 			if err := o.putHashes(ctx, hashMap{hashType: hash}); err != nil {
 				fs.Errorf(nil, "%s: failed to import: %v", remote, err)
 			}
-			accounting.Stats(ctx).NewCheckingTransfer(obj).Done(ctx, err)
+			accounting.Stats(ctx).NewCheckingTransfer(obj, "importing").Done(ctx, err)
 			doneCount++
 		}
 	})

@@ -1,3 +1,4 @@
+// Package api provides types used by the Jottacloud API.
 package api
 
 import (
@@ -69,7 +70,7 @@ func (t *Rfc3339Time) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
 
 // MarshalJSON turns a Rfc3339Time into JSON
 func (t *Rfc3339Time) MarshalJSON() ([]byte, error) {
-	return []byte(fmt.Sprintf("\"%s\"", t.String())), nil
+	return fmt.Appendf(nil, "\"%s\"", t.String()), nil
 }
 
 // LoginToken is struct representing the login token generated in the WebUI
@@ -164,25 +165,25 @@ type DeviceRegistrationResponse struct {
 
 // CustomerInfo provides general information about the account. Required for finding the correct internal username.
 type CustomerInfo struct {
-	Username          string      `json:"username"`
-	Email             string      `json:"email"`
-	Name              string      `json:"name"`
-	CountryCode       string      `json:"country_code"`
-	LanguageCode      string      `json:"language_code"`
-	CustomerGroupCode string      `json:"customer_group_code"`
-	BrandCode         string      `json:"brand_code"`
-	AccountType       string      `json:"account_type"`
-	SubscriptionType  string      `json:"subscription_type"`
-	Usage             int64       `json:"usage"`
-	Quota             int64       `json:"quota"`
-	BusinessUsage     int64       `json:"business_usage"`
-	BusinessQuota     int64       `json:"business_quota"`
-	WriteLocked       bool        `json:"write_locked"`
-	ReadLocked        bool        `json:"read_locked"`
-	LockedCause       interface{} `json:"locked_cause"`
-	WebHash           string      `json:"web_hash"`
-	AndroidHash       string      `json:"android_hash"`
-	IOSHash           string      `json:"ios_hash"`
+	Username          string `json:"username"`
+	Email             string `json:"email"`
+	Name              string `json:"name"`
+	CountryCode       string `json:"country_code"`
+	LanguageCode      string `json:"language_code"`
+	CustomerGroupCode string `json:"customer_group_code"`
+	BrandCode         string `json:"brand_code"`
+	AccountType       string `json:"account_type"`
+	SubscriptionType  string `json:"subscription_type"`
+	Usage             int64  `json:"usage"`
+	Quota             int64  `json:"quota"`
+	BusinessUsage     int64  `json:"business_usage"`
+	BusinessQuota     int64  `json:"business_quota"`
+	WriteLocked       bool   `json:"write_locked"`
+	ReadLocked        bool   `json:"read_locked"`
+	LockedCause       any    `json:"locked_cause"`
+	WebHash           string `json:"web_hash"`
+	AndroidHash       string `json:"android_hash"`
+	IOSHash           string `json:"ios_hash"`
 }
 
 // TrashResponse is returned when emptying the Trash
@@ -394,7 +395,7 @@ type JottaFile struct {
 	State           string    `xml:"currentRevision>state"`
 	CreatedAt       JottaTime `xml:"currentRevision>created"`
 	ModifiedAt      JottaTime `xml:"currentRevision>modified"`
-	Updated         JottaTime `xml:"currentRevision>updated"`
+	UpdatedAt       JottaTime `xml:"currentRevision>updated"`
 	Size            int64     `xml:"currentRevision>size"`
 	MimeType        string    `xml:"currentRevision>mime"`
 	MD5             string    `xml:"currentRevision>md5"`

@@ -1,16 +1,14 @@
-//go:build linux || (darwin && amd64)
-// +build linux darwin,amd64
+//go:build linux
 
 package mount2
 
 import (
 	"testing"
 
-	"github.com/rclone/rclone/fstest/testy"
+	"github.com/rclone/rclone/vfs/vfscommon"
 	"github.com/rclone/rclone/vfs/vfstest"
 )
 
 func TestMount(t *testing.T) {
-	testy.SkipUnreliable(t)
-	vfstest.RunTests(t, false, mount)
+	vfstest.RunTests(t, false, vfscommon.CacheModeOff, true, mount)
 }

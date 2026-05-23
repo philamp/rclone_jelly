@@ -35,6 +35,30 @@ func Object(w http.ResponseWriter, r *http.Request, o fs.Object) {
 		w.Header().Set("Content-Type", mimeType)
 	}
 
+	// Set last modified
+	modTime := o.ModTime(r.Context())
+	w.Header().Set("Last-Modified", modTime.UTC().Format(http.TimeFormat))
+
+	// Set metadata headers if present
+	metadata, err := fs.GetMetadata(r.Context(), o)
+	if err != nil {
+		fs.Debugf(o, "Request get metadata error: %v", err)
+	}
+	if metadata != nil {
+		if metadata["content-disposition"] != "" {
+			w.Header().Set("Content-Disposition", metadata["content-disposition"])
+		}
+		if metadata["cache-control"] != "" {
+			w.Header().Set("Cache-Control", metadata["cache-control"])
+		}
+		if metadata["content-language"] != "" {
+			w.Header().Set("Content-Language", metadata["content-language"])
+		}
+		if metadata["content-encoding"] != "" {
+			w.Header().Set("Content-Encoding", metadata["content-encoding"])
+		}
+	}
+
 	if r.Method == "HEAD" {
 		return
 	}
@@ -75,7 +99,7 @@ func Object(w http.ResponseWriter, r *http.Request, o fs.Object) {
 		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 		return
 	}
-	tr := accounting.Stats(r.Context()).NewTransfer(o)
+	tr := accounting.Stats(r.Context()).NewTransfer(o, nil)
 	defer func() {
 		tr.Done(r.Context(), err)
 	}()

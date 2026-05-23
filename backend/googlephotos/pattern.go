@@ -38,7 +38,7 @@ type dirPattern struct {
 	toEntries func(ctx context.Context, f lister, prefix string, match []string) (fs.DirEntries, error)
 }
 
-// dirPatters is a slice of all the directory patterns
+// dirPatterns is a slice of all the directory patterns
 type dirPatterns []dirPattern
 
 // patterns describes the layout of the google photos backend file system.
@@ -315,7 +315,7 @@ func yearMonthDayFilter(ctx context.Context, f lister, match []string) (sf api.S
 
 // featureFilter creates a filter for the Feature enum
 //
-// The API only supports one feature, FAVORITES, so hardcode that feature
+// The API only supports one feature, FAVORITES, so hardcode that feature.
 //
 // https://developers.google.com/photos/library/reference/rest/v1/mediaItems/search#FeatureFilter
 func featureFilter(ctx context.Context, f lister, match []string) (sf api.SearchFilter) {

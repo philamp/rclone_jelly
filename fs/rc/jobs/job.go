@@ -1,26 +1,40 @@
-// Manage background jobs that the rc is running
-
+// Package jobs manages background jobs that the rc is running.
 package jobs
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"runtime/debug"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
+	"github.com/rclone/rclone/fs/cache"
 	"github.com/rclone/rclone/fs/filter"
 	"github.com/rclone/rclone/fs/rc"
+	"golang.org/x/sync/errgroup"
 )
+
+// Fill in these to avoid circular dependencies
+func init() {
+	cache.JobOnFinish = OnFinish
+	cache.JobGetJobID = GetJobID
+}
 
 // Job describes an asynchronous task started via the rc package
 type Job struct {
 	mu        sync.Mutex
 	ID        int64     `json:"id"`
+	ExecuteID string    `json:"executeId"`
 	Group     string    `json:"group"`
 	StartTime time.Time `json:"startTime"`
 	EndTime   time.Time `json:"endTime"`
@@ -67,21 +81,28 @@ func (job *Job) finish(out rc.Params, err error) {
 	running.kickExpire() // make sure this job gets expired
 }
 
-func (job *Job) addListener(fn *func()) {
-	job.mu.Lock()
-	defer job.mu.Unlock()
-	job.listeners = append(job.listeners, fn)
-}
-
 func (job *Job) removeListener(fn *func()) {
 	job.mu.Lock()
 	defer job.mu.Unlock()
 	for i, ln := range job.listeners {
 		if ln == fn {
-			job.listeners = append(job.listeners[:i], job.listeners[i+1:]...)
+			job.listeners = slices.Delete(job.listeners, i, i+1)
 			return
 		}
 	}
+}
+
+// OnFinish adds listener to job that will be triggered when job is finished.
+// It returns a function to cancel listening.
+func (job *Job) OnFinish(fn func()) func() {
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	if job.Finished {
+		go fn()
+	} else {
+		job.listeners = append(job.listeners, &fn)
+	}
+	return func() { job.removeListener(&fn) }
 }
 
 // run the job until completion writing the return status
@@ -104,14 +125,16 @@ type Jobs struct {
 
 var (
 	running = newJobs()
-	jobID   = int64(0)
+	jobID   atomic.Int64
+	// executeID is a unique ID for this rclone execution
+	executeID = uuid.New().String()
 )
 
 // newJobs makes a new Jobs structure
 func newJobs() *Jobs {
 	return &Jobs{
 		jobs: map[int64]*Job{},
-		opt:  &rc.DefaultOpt,
+		opt:  &rc.Opt,
 	}
 }
 
@@ -122,7 +145,7 @@ func SetOpt(opt *rc.Options) {
 
 // SetInitialJobID allows for setting jobID before starting any jobs.
 func SetInitialJobID(id int64) {
-	if !atomic.CompareAndSwapInt64(&jobID, 0, id) {
+	if !jobID.CompareAndSwap(0, id) {
 		panic("Setting jobID is only possible before starting any jobs")
 	}
 }
@@ -132,7 +155,7 @@ func (jobs *Jobs) kickExpire() {
 	jobs.mu.Lock()
 	defer jobs.mu.Unlock()
 	if !jobs.expireRunning {
-		time.AfterFunc(jobs.opt.JobExpireInterval, jobs.Expire)
+		time.AfterFunc(time.Duration(jobs.opt.JobExpireInterval), jobs.Expire)
 		jobs.expireRunning = true
 	}
 }
@@ -144,13 +167,13 @@ func (jobs *Jobs) Expire() {
 	now := time.Now()
 	for ID, job := range jobs.jobs {
 		job.mu.Lock()
-		if job.Finished && now.Sub(job.EndTime) > jobs.opt.JobExpireDuration {
+		if job.Finished && now.Sub(job.EndTime) > time.Duration(jobs.opt.JobExpireDuration) {
 			delete(jobs.jobs, ID)
 		}
 		job.mu.Unlock()
 	}
 	if len(jobs.jobs) != 0 {
-		time.AfterFunc(jobs.opt.JobExpireInterval, jobs.Expire)
+		time.AfterFunc(time.Duration(jobs.opt.JobExpireInterval), jobs.Expire)
 		jobs.expireRunning = true
 	} else {
 		jobs.expireRunning = false
@@ -166,6 +189,22 @@ func (jobs *Jobs) IDs() (IDs []int64) {
 		IDs = append(IDs, ID)
 	}
 	return IDs
+}
+
+// Stats returns the IDs of the running and finished jobs
+func (jobs *Jobs) Stats() (running []int64, finished []int64) {
+	jobs.mu.RLock()
+	defer jobs.mu.RUnlock()
+	running = []int64{}
+	finished = []int64{}
+	for jobID := range jobs.jobs {
+		if jobs.jobs[jobID].Finished {
+			finished = append(finished, jobID)
+		} else {
+			running = append(running, jobID)
+		}
+	}
+	return running, finished
 }
 
 // Get a job with a given ID or nil if it doesn't exist
@@ -238,9 +277,14 @@ func getFilter(ctx context.Context, in rc.Params) (context.Context, error) {
 	return ctx, nil
 }
 
+type jobKeyType struct{}
+
+// Key for adding jobs to ctx
+var jobKey = jobKeyType{}
+
 // NewJob creates a Job and executes it, possibly in the background if _async is set
 func (jobs *Jobs) NewJob(ctx context.Context, fn rc.Func, in rc.Params) (job *Job, out rc.Params, err error) {
-	id := atomic.AddInt64(&jobID, 1)
+	id := jobID.Add(1)
 	in = in.Copy() // copy input so we can change it
 
 	ctx, isAsync, err := getAsync(ctx, in)
@@ -271,17 +315,24 @@ func (jobs *Jobs) NewJob(ctx context.Context, fn rc.Func, in rc.Params) (job *Jo
 	}
 	job = &Job{
 		ID:        id,
+		ExecuteID: executeID,
 		Group:     group,
 		StartTime: time.Now(),
 		Stop:      stop,
 	}
+
 	jobs.mu.Lock()
 	jobs.jobs[job.ID] = job
 	jobs.mu.Unlock()
+
+	// Add the job to the context
+	ctx = context.WithValue(ctx, jobKey, job)
+
 	if isAsync {
 		go job.run(ctx, fn, in)
 		out = make(rc.Params)
 		out["jobid"] = job.ID
+		out["executeId"] = job.ExecuteID
 		err = nil
 	} else {
 		job.run(ctx, fn, in)
@@ -304,19 +355,30 @@ func OnFinish(jobID int64, fn func()) (func(), error) {
 	if job == nil {
 		return func() {}, errors.New("job not found")
 	}
-	if job.Finished {
-		fn()
-	} else {
-		job.addListener(&fn)
+	return job.OnFinish(fn), nil
+}
+
+// GetJob gets the Job from the context if possible
+func GetJob(ctx context.Context) (job *Job, ok bool) {
+	job, ok = ctx.Value(jobKey).(*Job)
+	return job, ok
+}
+
+// GetJobID gets the Job from the context if possible
+func GetJobID(ctx context.Context) (jobID int64, ok bool) {
+	job, ok := GetJob(ctx)
+	if !ok {
+		return -1, ok
 	}
-	return func() { job.removeListener(&fn) }, nil
+	return job.ID, true
 }
 
 func init() {
 	rc.Add(rc.Call{
-		Path:  "job/status",
-		Fn:    rcJobStatus,
-		Title: "Reads the status of the job ID",
+		Path:   "job/status",
+		NoAuth: true,
+		Fn:     rcJobStatus,
+		Title:  "Reads the status of the job ID",
 		Help: `Parameters:
 
 - jobid - id of the job (integer).
@@ -329,6 +391,7 @@ Results:
 - error - error from the job or empty string for no error
 - finished - boolean whether the job has finished or not
 - id - as passed in above
+- executeId - rclone instance ID (changes after restart); combined with id uniquely identifies a job
 - startTime - time the job started (e.g. "2018-10-26T18:50:20.528336039+01:00")
 - success - boolean - true for success false otherwise
 - output - output of the job as would have been returned if called synchronously
@@ -359,14 +422,18 @@ func rcJobStatus(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 
 func init() {
 	rc.Add(rc.Call{
-		Path:  "job/list",
-		Fn:    rcJobList,
-		Title: "Lists the IDs of the running jobs",
+		Path:   "job/list",
+		NoAuth: true,
+		Fn:     rcJobList,
+		Title:  "Lists the IDs of the running jobs",
 		Help: `Parameters: None.
 
 Results:
 
-- jobids - array of integer job ids.
+- executeId - string id of rclone executing (change after restart)
+- jobids - array of integer job ids (starting at 1 on each restart)
+- runningIds - array of integer job ids that are running
+- finishedIds - array of integer job ids that are finished
 `,
 	})
 }
@@ -375,6 +442,10 @@ Results:
 func rcJobList(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 	out = make(rc.Params)
 	out["jobids"] = running.IDs()
+	runningIDs, finishedIDs := running.Stats()
+	out["runningIds"] = runningIDs
+	out["finishedIds"] = finishedIDs
+	out["executeId"] = executeID
 	return out, nil
 }
 
@@ -404,5 +475,281 @@ func rcJobStop(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 	defer job.mu.Unlock()
 	out = make(rc.Params)
 	job.Stop()
+	return out, nil
+}
+
+func init() {
+	rc.Add(rc.Call{
+		Path:  "job/stopgroup",
+		Fn:    rcGroupStop,
+		Title: "Stop all running jobs in a group",
+		Help: `Parameters:
+
+- group - name of the group (string).
+`,
+	})
+}
+
+// Stops all running jobs in a group
+func rcGroupStop(ctx context.Context, in rc.Params) (out rc.Params, err error) {
+	group, err := in.GetString("group")
+	if err != nil {
+		return nil, err
+	}
+	running.mu.RLock()
+	defer running.mu.RUnlock()
+	for _, job := range running.jobs {
+		if job.Group == group {
+			job.mu.Lock()
+			job.Stop()
+			job.mu.Unlock()
+		}
+	}
+	out = make(rc.Params)
+	return out, nil
+}
+
+// NewJobFromParams creates an rc job rc.Params.
+//
+// The JSON blob should contain a _path entry.
+//
+// It returns a rc.Params as output which may be an error.
+func NewJobFromParams(ctx context.Context, in rc.Params) (out rc.Params) {
+	path := "unknown"
+
+	// Return an rc error blob
+	rcError := func(err error, status int) rc.Params {
+		fs.Errorf(nil, "rc: %q: error: %v", path, err)
+		out, _ = rc.Error(path, in, err, status)
+		return out
+	}
+
+	// Find the call
+	path, err := in.GetString("_path")
+	if err != nil {
+		return rcError(err, http.StatusNotFound)
+	}
+	delete(in, "_path")
+	call := rc.Calls.Get(path)
+	if call == nil {
+		return rcError(fmt.Errorf("couldn't find path %q", path), http.StatusNotFound)
+	}
+	if call.NeedsRequest {
+		return rcError(fmt.Errorf("can't run path %q as it needs the request", path), http.StatusBadRequest)
+	}
+	if call.NeedsResponse {
+		return rcError(fmt.Errorf("can't run path %q as it needs the response", path), http.StatusBadRequest)
+	}
+
+	// Pass on the group if one is set in the context and it isn't set in the input.
+	if _, found := in["_group"]; !found {
+		group, ok := accounting.StatsGroupFromContext(ctx)
+		if ok {
+			in["_group"] = group
+		}
+	}
+
+	fs.Debugf(nil, "rc: %q: with parameters %+v", path, in)
+	_, out, err = NewJob(ctx, call.Fn, in)
+	if err != nil {
+		return rcError(err, http.StatusInternalServerError)
+	}
+	if out == nil {
+		out = make(rc.Params)
+	}
+
+	fs.Debugf(nil, "rc: %q: reply %+v: %v", path, out, err)
+	return out
+}
+
+// NewJobFromBytes creates an rc job from a JSON blob as bytes.
+//
+// The JSON blob should contain a _path entry.
+//
+// It returns a JSON blob as output which may be an error.
+func NewJobFromBytes(ctx context.Context, inBuf []byte) (outBuf []byte) {
+	var in rc.Params
+	var out rc.Params
+
+	// Parse a JSON blob from the input
+	err := json.Unmarshal(inBuf, &in)
+	if err != nil {
+		out, _ = rc.Error("unknown", in, err, http.StatusBadRequest)
+	} else {
+		out = NewJobFromParams(ctx, in)
+	}
+
+	var w bytes.Buffer
+	err = rc.WriteJSON(&w, out)
+	if err != nil {
+		fs.Errorf(nil, "rc: NewJobFromBytes: failed to write JSON output: %v", err)
+		return []byte(`{"error":"failed to write JSON output"}`)
+	}
+	return w.Bytes()
+}
+
+func init() {
+	rc.Add(rc.Call{
+		Path:  "job/batch",
+		Fn:    rcBatch,
+		Title: "Run a batch of rclone rc commands concurrently.",
+		Help: strings.ReplaceAll(`
+This takes the following parameters:
+
+- concurrency - int - do this many commands concurrently. Defaults to |--transfers| if not set.
+- inputs - an list of inputs to the commands with an extra |_path| parameter
+
+|||json
+{
+    "_path": "rc/path",
+    "param1": "parameter for the path as documented",
+    "param2": "parameter for the path as documented, etc",
+}
+|||
+
+The inputs may use |_async|, |_group|, |_config| and |_filter| as normal when using the rc.
+
+Returns:
+
+- results - a list of results from the commands with one entry for each in inputs.
+
+For example:
+
+|||sh
+rclone rc job/batch --json '{
+  "inputs": [
+    {
+      "_path": "rc/noop",
+      "parameter": "OK"
+    },
+    {
+      "_path": "rc/error",
+      "parameter": "BAD"
+    }
+  ]
+}
+'
+|||
+
+Gives the result:
+
+|||json
+{
+  "results": [
+    {
+      "parameter": "OK"
+    },
+    {
+      "error": "arbitrary error on input map[parameter:BAD]",
+      "input": {
+        "parameter": "BAD"
+      },
+      "path": "rc/error",
+      "status": 500
+    }
+  ]
+}
+|||
+`, "|", "`"),
+	})
+}
+
+/*
+// Run a single batch job
+func runBatchJob(ctx context.Context, inputAny any) (out rc.Params, err error) {
+	var in rc.Params
+	path := "unknown"
+	defer func() {
+		if err != nil {
+			out, _ = rc.Error(path, in, err, http.StatusInternalServerError)
+		}
+	}()
+
+	// get the inputs to the job
+	input, ok := inputAny.(map[string]any)
+	if !ok {
+		return nil, rc.NewErrParamInvalid(fmt.Errorf("\"inputs\" items must be objects not %T", inputAny))
+	}
+	in = rc.Params(input)
+	path, err = in.GetString("_path")
+	if err != nil {
+		return nil, err
+	}
+	delete(in, "_path")
+	call := rc.Calls.Get(path)
+
+	// Check call
+	if call == nil {
+		return nil, rc.NewErrParamInvalid(fmt.Errorf("path %q does not exist", path))
+	}
+	path = call.Path
+	if call.NeedsRequest {
+		return nil, rc.NewErrParamInvalid(fmt.Errorf("can't run path %q as it needs the request", path))
+	}
+	if call.NeedsResponse {
+		return nil, rc.NewErrParamInvalid(fmt.Errorf("can't run path %q as it needs the response", path))
+	}
+
+	// Run the job
+	_, out, err = NewJob(ctx, call.Fn, in)
+	if err != nil {
+		return nil, err
+	}
+
+	// Reshape (serialize then deserialize) the data so it is in the form expected
+	err = rc.Reshape(&out, out)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+        }
+*/
+
+// Batch the registered commands
+func rcBatch(ctx context.Context, in rc.Params) (out rc.Params, err error) {
+	out = make(rc.Params)
+
+	// Read inputs
+	inputsAny, err := in.Get("inputs")
+	if err != nil {
+		return nil, err
+	}
+	inputs, ok := inputsAny.([]any)
+	if !ok {
+		return nil, rc.NewErrParamInvalid(fmt.Errorf("expecting list key %q (was %T)", "inputs", inputsAny))
+	}
+
+	// Read concurrency
+	concurrency, err := in.GetInt64("concurrency")
+	if rc.IsErrParamNotFound(err) {
+		ci := fs.GetConfig(ctx)
+		concurrency = int64(ci.Transfers)
+	} else if err != nil {
+		return nil, err
+	}
+
+	// Prepare outputs
+	results := make([]rc.Params, len(inputs))
+	out["results"] = results
+
+	g, gCtx := errgroup.WithContext(ctx)
+	g.SetLimit(int(concurrency))
+	for i, inputAny := range inputs {
+		input, ok := inputAny.(map[string]any)
+		if !ok {
+			results[i], _ = rc.Error("unknown", nil, fmt.Errorf("\"inputs\" items must be objects not %T", inputAny), http.StatusBadRequest)
+			continue
+		}
+		in := rc.Params(input)
+		if concurrency <= 1 {
+			results[i] = NewJobFromParams(ctx, in)
+		} else {
+			g.Go(func() error {
+				results[i] = NewJobFromParams(gCtx, in)
+				return nil
+			})
+		}
+	}
+	_ = g.Wait()
 	return out, nil
 }

@@ -77,7 +77,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"path"
@@ -98,7 +97,6 @@ import (
 	"github.com/rclone/rclone/lib/pacer"
 	"github.com/rclone/rclone/lib/random"
 	"github.com/rclone/rclone/lib/rest"
-	"golang.org/x/oauth2"
 )
 
 const (
@@ -116,13 +114,11 @@ const (
 )
 
 // Generate a new oauth2 config which we will update when we know the TokenURL
-func newOauthConfig(tokenURL string) *oauth2.Config {
-	return &oauth2.Config{
-		Scopes: nil,
-		Endpoint: oauth2.Endpoint{
-			AuthURL:  "https://secure.sharefile.com/oauth/authorize",
-			TokenURL: tokenURL,
-		},
+func newOauthConfig(tokenURL string) *oauthutil.Config {
+	return &oauthutil.Config{
+		Scopes:       nil,
+		AuthURL:      "https://secure.sharefile.com/oauth/authorize",
+		TokenURL:     tokenURL,
 		ClientID:     rcloneClientID,
 		ClientSecret: obscure.MustReveal(rcloneEncryptedClientSecret),
 		RedirectURL:  oauthutil.RedirectPublicSecureURL,
@@ -137,7 +133,7 @@ func init() {
 		NewFs:       NewFs,
 		Config: func(ctx context.Context, name string, m configmap.Mapper, config fs.ConfigIn) (*fs.ConfigOut, error) {
 			oauthConfig := newOauthConfig("")
-			checkAuth := func(oauthConfig *oauth2.Config, auth *oauthutil.AuthResult) error {
+			checkAuth := func(oauthConfig *oauthutil.Config, auth *oauthutil.AuthResult) error {
 				if auth == nil || auth.Form == nil {
 					return errors.New("endpoint not found in response")
 				}
@@ -148,7 +144,7 @@ func init() {
 				}
 				endpoint := "https://" + subdomain + "." + apicp
 				m.Set("endpoint", endpoint)
-				oauthConfig.Endpoint.TokenURL = endpoint + tokenPath
+				oauthConfig.TokenURL = endpoint + tokenPath
 				return nil
 			}
 			return oauthutil.ConfigOut("", &oauthutil.Options{
@@ -156,7 +152,7 @@ func init() {
 				CheckAuth:    checkAuth,
 			})
 		},
-		Options: []fs.Option{{
+		Options: append(oauthutil.SharedOptions, []fs.Option{{
 			Name:     "upload_cutoff",
 			Help:     "Cutoff for switching to multipart upload.",
 			Default:  defaultUploadCutoff,
@@ -183,6 +179,7 @@ standard values here or any folder ID (long hex number ID).`,
 				Value: "top",
 				Help:  "Access the home, favorites, and shared folders as well as the connectors.",
 			}},
+			Sensitive: true,
 		}, {
 			Name:    "chunk_size",
 			Default: defaultChunkSize,
@@ -217,7 +214,7 @@ be set manually to something like: https://XXX.sharefile.com
 				encoder.EncodeLeftSpace |
 				encoder.EncodeLeftPeriod |
 				encoder.EncodeInvalidUtf8),
-		}},
+		}}...),
 	})
 }
 
@@ -479,7 +476,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to open timezone db: %w", err)
 	}
-	tzdata, err := ioutil.ReadAll(timezone)
+	tzdata, err := io.ReadAll(timezone)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read timezone: %w", err)
 	}
@@ -540,7 +537,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 // Fill up (or reset) the buffer tokens
 func (f *Fs) fillBufferTokens() {
 	f.bufferTokens = make(chan []byte, f.ci.Transfers)
-	for i := 0; i < f.ci.Transfers; i++ {
+	for range f.ci.Transfers {
 		f.bufferTokens <- nil
 	}
 }
@@ -741,7 +738,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // Creates from the parameters passed in a half finished Object which
 // must have setMetaData called on it
 //
-// Returns the object, leaf, directoryID and error
+// Returns the object, leaf, directoryID and error.
 //
 // Used to create new objects
 func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time, size int64) (o *Object, leaf string, directoryID string, err error) {
@@ -760,7 +757,7 @@ func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time,
 
 // Put the object
 //
-// Copy the reader in to the new object which is returned
+// Copy the reader in to the new object which is returned.
 //
 // The new object may have been created if an error is returned
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
@@ -776,16 +773,21 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	}
 }
 
-// PutStream uploads to the remote path with the modTime given of indeterminate size
-func (f *Fs) PutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
+// FIXMEPutStream uploads to the remote path with the modTime given of indeterminate size
+//
+// PutStream no longer appears to work - the streamed uploads need the
+// size specified at the start otherwise we get this error:
+//
+//	upload failed: file size does not match (-2)
+func (f *Fs) FIXMEPutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
 	return f.Put(ctx, in, src, options...)
 }
 
 // PutUnchecked the object into the container
 //
-// This will produce an error if the object already exists
+// This will produce an error if the object already exists.
 //
-// Copy the reader in to the new object which is returned
+// Copy the reader in to the new object which is returned.
 //
 // The new object may have been created if an error is returned
 func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
@@ -973,9 +975,9 @@ func (f *Fs) move(ctx context.Context, isFile bool, id, oldLeaf, newLeaf, oldDir
 
 // Move src to this remote using server-side move operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -1043,9 +1045,9 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 
 // Copy src to this remote using server-side copy operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -1077,7 +1079,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (dst fs.Obj
 	}
 	dstLeaf = f.opt.Enc.FromStandardName(dstLeaf)
 
-	sameName := strings.ToLower(srcLeaf) == strings.ToLower(dstLeaf)
+	sameName := strings.EqualFold(srcLeaf, dstLeaf)
 	if sameName && srcParentID == dstParentID {
 		return nil, fmt.Errorf("copy: can't copy to a file in the same directory whose name only differs in case: %q vs %q", srcLeaf, dstLeaf)
 	}
@@ -1096,7 +1098,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (dst fs.Obj
 			directCopy = true
 		} else if err != nil {
 			return nil, fmt.Errorf("copy: failed to examine destination dir: %w", err)
-		} else {
+			//} else {
 			// otherwise need to copy via a temporary directory
 		}
 	}
@@ -1169,6 +1171,12 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (dst fs.Obj
 // optional interface
 func (f *Fs) DirCacheFlush() {
 	f.dirCache.ResetRoot()
+}
+
+// Shutdown shutdown the fs
+func (f *Fs) Shutdown(ctx context.Context) error {
+	f.tokenRenewer.Shutdown()
+	return nil
 }
 
 // Hashes returns the supported hash sets.
@@ -1256,7 +1264,6 @@ func (o *Object) readMetaData(ctx context.Context) (err error) {
 
 // ModTime returns the modification time of the object
 //
-//
 // It attempts to read the objects mtime and if that isn't present the
 // LastModified returned in the http headers
 func (o *Object) ModTime(ctx context.Context) time.Time {
@@ -1324,7 +1331,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 
 // Update the object with the contents of the io.Reader, modTime and size
 //
-// If existing is set then it updates the object rather than creating a new one
+// If existing is set then it updates the object rather than creating a new one.
 //
 // The new object may have been created if an error is returned
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
@@ -1455,13 +1462,14 @@ func (o *Object) ID() string {
 
 // Check the interfaces are satisfied
 var (
-	_ fs.Fs              = (*Fs)(nil)
-	_ fs.Purger          = (*Fs)(nil)
-	_ fs.Mover           = (*Fs)(nil)
-	_ fs.DirMover        = (*Fs)(nil)
-	_ fs.Copier          = (*Fs)(nil)
-	_ fs.PutStreamer     = (*Fs)(nil)
+	_ fs.Fs       = (*Fs)(nil)
+	_ fs.Purger   = (*Fs)(nil)
+	_ fs.Mover    = (*Fs)(nil)
+	_ fs.DirMover = (*Fs)(nil)
+	_ fs.Copier   = (*Fs)(nil)
+	// _ fs.PutStreamer     = (*Fs)(nil)
 	_ fs.DirCacheFlusher = (*Fs)(nil)
+	_ fs.Shutdowner      = (*Fs)(nil)
 	_ fs.Object          = (*Object)(nil)
 	_ fs.IDer            = (*Object)(nil)
 )

@@ -3,32 +3,33 @@ package rcserver
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/go-chi/chi/v5"
 
 	_ "github.com/rclone/rclone/backend/local"
 	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/config/configfile"
 	"github.com/rclone/rclone/fs/rc"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
-	testBindAddress = "localhost:0"
-	testTemplate    = "testdata/golden/testindex.html"
-	testFs          = "testdata/files"
-	remoteURL       = "[" + testFs + "]/" // initial URL path to fetch from that remote
+	testBindAddress     = "localhost:0"
+	defaultTestTemplate = "testdata/golden/testindex.html"
+	testFs              = "testdata/files"
+	remoteURL           = "[" + testFs + "]/" // initial URL path to fetch from that remote
 )
 
 func TestMain(m *testing.M) {
@@ -49,26 +50,26 @@ func TestMain(m *testing.M) {
 // Test the RC server runs and we can do HTTP fetches from it.
 // We'll do the majority of the testing with the httptest framework
 func TestRcServer(t *testing.T) {
-	opt := rc.DefaultOpt
-	opt.HTTPOptions.ListenAddr = testBindAddress
-	opt.HTTPOptions.Template = testTemplate
+	opt := rc.Opt
+	opt.HTTP.ListenAddr = []string{testBindAddress}
+	opt.Template.Path = defaultTestTemplate
 	opt.Enabled = true
 	opt.Serve = true
 	opt.Files = testFs
 	mux := http.NewServeMux()
-	rcServer := newServer(context.Background(), &opt, mux)
+	rcServer, err := newServer(context.Background(), &opt, mux)
+	require.NoError(t, err)
 	assert.NoError(t, rcServer.Serve())
 	defer func() {
-		rcServer.Close()
+		assert.NoError(t, rcServer.Shutdown())
 		rcServer.Wait()
 	}()
-	testURL := rcServer.Server.URL()
+	testURL := rcServer.server.URLs()[0]
 
 	// Do the simplest possible test to check the server is alive
 	// Do it a few times to wait for the server to start
 	var resp *http.Response
-	var err error
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		resp, err = http.Get(testURL + "file.txt")
 		if err == nil {
 			break
@@ -77,7 +78,7 @@ func TestRcServer(t *testing.T) {
 	}
 
 	require.NoError(t, err)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 
 	require.NoError(t, err)
@@ -90,6 +91,8 @@ func TestRcServer(t *testing.T) {
 type testRun struct {
 	Name        string
 	URL         string
+	User        string
+	Pass        string
 	Status      int
 	Method      string
 	Range       string
@@ -102,13 +105,25 @@ type testRun struct {
 
 // Run a suite of tests
 func testServer(t *testing.T, tests []testRun, opt *rc.Options) {
+	t.Helper()
+
 	ctx := context.Background()
 	configfile.Install()
-	mux := http.NewServeMux()
-	opt.HTTPOptions.Template = testTemplate
-	rcServer := newServer(ctx, opt, mux)
+	if opt.Template.Path == "" {
+		opt.Template.Path = defaultTestTemplate
+	}
+	rcServer, err := newServer(ctx, opt, http.DefaultServeMux)
+	require.NoError(t, err)
+	testURL := rcServer.server.URLs()[0]
+	mux := rcServer.server.Router()
+	emulateCalls(t, tests, mux, testURL)
+}
+
+func emulateCalls(t *testing.T, tests []testRun, mux chi.Router, testURL string) {
 	for _, test := range tests {
 		t.Run(test.Name, func(t *testing.T) {
+			t.Helper()
+
 			method := test.Method
 			if method == "" {
 				method = "GET"
@@ -126,22 +141,34 @@ func testServer(t *testing.T, tests []testRun, opt *rc.Options) {
 			if test.ContentType != "" {
 				req.Header.Add("Content-Type", test.ContentType)
 			}
+			if test.User != "" && test.Pass != "" {
+				req.SetBasicAuth(test.User, test.Pass)
+			}
 
 			w := httptest.NewRecorder()
-			rcServer.handler(w, req)
+			mux.ServeHTTP(w, req)
 			resp := w.Result()
 
 			assert.Equal(t, test.Status, resp.StatusCode)
-			body, err := ioutil.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
 			require.NoError(t, err)
 
-			if test.Contains == nil {
-				assert.Equal(t, test.Expected, string(body))
+			if test.ContentType == "application/json" && test.Expected != "" {
+				expectedNormalized := normalizeJSON(t, test.Expected)
+				actualNormalized := normalizeJSON(t, string(body))
+				assert.Equal(t, expectedNormalized, actualNormalized, "Normalized JSON does not match")
+			} else if test.Contains == nil {
+				// go1.23 started putting an html wrapper
+				bodyNormalized := strings.TrimPrefix(string(body), "<!doctype html>\n<meta name=\"viewport\" content=\"width=device-width\">\n")
+				assert.Equal(t, test.Expected, bodyNormalized)
 			} else {
 				assert.True(t, test.Contains.Match(body), fmt.Sprintf("body didn't match: %v: %v", test.Contains, string(body)))
 			}
 
 			for k, v := range test.Headers {
+				if v == "testURL" {
+					v = testURL
+				}
 				assert.Equal(t, v, resp.Header.Get(k), k)
 			}
 		})
@@ -150,8 +177,9 @@ func testServer(t *testing.T, tests []testRun, opt *rc.Options) {
 
 // return an enabled rc
 func newTestOpt() rc.Options {
-	opt := rc.DefaultOpt
+	opt := rc.Opt
 	opt.Enabled = true
+	opt.HTTP.ListenAddr = []string{testBindAddress}
 	return opt
 }
 
@@ -163,6 +191,7 @@ func TestFileServing(t *testing.T) {
 		Expected: `<pre>
 <a href="dir/">dir/</a>
 <a href="file.txt">file.txt</a>
+<a href="modtime/">modtime/</a>
 </pre>
 `,
 	}, {
@@ -234,6 +263,7 @@ func TestRemoteServing(t *testing.T) {
 <body>
 <h1>Directory listing of /</h1>
 <a href="dir/">dir/</a><br />
+<a href="modtime/">modtime/</a><br />
 <a href="file.txt">file.txt</a><br />
 </body>
 </html>
@@ -328,7 +358,7 @@ func TestRemoteServing(t *testing.T) {
 			URL:    "[notfoundremote:]/",
 			Status: http.StatusInternalServerError,
 			Expected: `{
-	"error": "failed to make Fs: didn't find section in config file",
+	"error": "failed to make Fs: didn't find section in config file (\"notfoundremote\")",
 	"input": null,
 	"path": "/",
 	"status": 500
@@ -373,11 +403,17 @@ func TestRC(t *testing.T) {
 }
 `,
 	}, {
-		Name:     "core-gc",
-		URL:      "core/gc", // returns nil, nil so check it is made into {}
-		Method:   "POST",
-		Status:   http.StatusOK,
-		Expected: "{}\n",
+		Name:   "core-gc",
+		URL:    "core/gc", // now requires auth
+		Method: "POST",
+		Status: http.StatusForbidden,
+		Expected: `{
+	"error": "authentication must be set up on the rc server to use \"core/gc\" or the --rc-no-auth flag must be in use",
+	"input": {},
+	"path": "core/gc",
+	"status": 403
+}
+`,
 	}, {
 		Name:   "url-params",
 		URL:    "rc/noop?param1=potato&param2=sausage",
@@ -394,6 +430,18 @@ func TestRC(t *testing.T) {
 		Method:      "POST",
 		Body:        `{ "param1":"string", "param2":true }`,
 		ContentType: "application/json",
+		Status:      http.StatusOK,
+		Expected: `{
+	"param1": "string",
+	"param2": true
+}
+`,
+	}, {
+		Name:        "json-mixed-case-content-type",
+		URL:         "rc/noop",
+		Method:      "POST",
+		Body:        `{ "param1":"string", "param2":true }`,
+		ContentType: "ApplicAtion/JsOn",
 		Status:      http.StatusOK,
 		Expected: `{
 	"param1": "string",
@@ -426,6 +474,44 @@ func TestRC(t *testing.T) {
 		"param1": "potato",
 		"param2": "sausage"
 	},
+	"path": "rc/noop",
+	"status": 400
+}
+`,
+	}, {
+		Name:        "json-charset",
+		URL:         "rc/noop",
+		Method:      "POST",
+		Body:        `{ "param1":"string", "param2":true }`,
+		ContentType: "application/json; charset=utf-8",
+		Status:      http.StatusOK,
+		Expected: `{
+	"param1": "string",
+	"param2": true
+}
+`,
+	}, {
+		Name:        "json-mixed-case-charset",
+		URL:         "rc/noop",
+		Method:      "POST",
+		Body:        `{ "param1":"string", "param2":true }`,
+		ContentType: "aPPlication/jSoN; charset=UtF-8",
+		Status:      http.StatusOK,
+		Expected: `{
+	"param1": "string",
+	"param2": true
+}
+`,
+	}, {
+		Name:        "json-bad-charset",
+		URL:         "rc/noop",
+		Method:      "POST",
+		Body:        `{ "param1":"string", "param2":true }`,
+		ContentType: "application/json; charset=latin1",
+		Status:      http.StatusBadRequest,
+		Expected: `{
+	"error": "unsupported charset \"latin1\" for JSON input",
+	"input": {},
 	"path": "rc/noop",
 	"status": 400
 }
@@ -469,6 +555,19 @@ func TestRC(t *testing.T) {
 	"status": 400
 }
 `,
+	}, {
+		Name:        "malformed-content-type",
+		URL:         "rc/noop",
+		Method:      "POST",
+		ContentType: "malformed/",
+		Status:      http.StatusBadRequest,
+		Expected: `{
+	"error": "failed to parse Content-Type: mime: expected token after slash",
+	"input": null,
+	"path": "rc/noop",
+	"status": 400
+}
+`,
 	}}
 	opt := newTestOpt()
 	opt.Serve = true
@@ -497,7 +596,7 @@ func TestRCWithAuth(t *testing.T) {
 		ContentType: "application/x-www-form-urlencoded",
 		Status:      http.StatusInternalServerError,
 		Expected: `{
-	"error": "Unknown returnType \"POTATO\"",
+	"error": "unknown returnType \"POTATO\"",
 	"input": {
 		"command": "version",
 		"returnType": "POTATO"
@@ -541,90 +640,6 @@ Unknown command
 	opt.Files = testFs
 	opt.NoAuth = true
 	testServer(t, tests, &opt)
-}
-
-func TestMethods(t *testing.T) {
-	tests := []testRun{{
-		Name:     "options",
-		URL:      "",
-		Method:   "OPTIONS",
-		Status:   http.StatusOK,
-		Expected: "",
-		Headers: map[string]string{
-			"Access-Control-Allow-Origin":   "http://localhost:5572/",
-			"Access-Control-Request-Method": "POST, OPTIONS, GET, HEAD",
-			"Access-Control-Allow-Headers":  "authorization, Content-Type",
-		},
-	}, {
-		Name:   "bad",
-		URL:    "",
-		Method: "POTATO",
-		Status: http.StatusMethodNotAllowed,
-		Expected: `{
-	"error": "method \"POTATO\" not allowed",
-	"input": null,
-	"path": "",
-	"status": 405
-}
-`,
-	}}
-	opt := newTestOpt()
-	opt.Serve = true
-	opt.Files = testFs
-	testServer(t, tests, &opt)
-}
-
-func TestMetrics(t *testing.T) {
-	stats := accounting.GlobalStats()
-	tests := makeMetricsTestCases(stats)
-	opt := newTestOpt()
-	opt.EnableMetrics = true
-	testServer(t, tests, &opt)
-
-	// Test changing a couple options
-	stats.Bytes(500)
-	stats.Deletes(30)
-	stats.Errors(2)
-	stats.Bytes(324)
-
-	tests = makeMetricsTestCases(stats)
-	testServer(t, tests, &opt)
-}
-
-func makeMetricsTestCases(stats *accounting.StatsInfo) (tests []testRun) {
-	tests = []testRun{{
-		Name:     "Bytes Transferred Metric",
-		URL:      "/metrics",
-		Method:   "GET",
-		Status:   http.StatusOK,
-		Contains: regexp.MustCompile(fmt.Sprintf("rclone_bytes_transferred_total %d", stats.GetBytes())),
-	}, {
-		Name:     "Checked Files Metric",
-		URL:      "/metrics",
-		Method:   "GET",
-		Status:   http.StatusOK,
-		Contains: regexp.MustCompile(fmt.Sprintf("rclone_checked_files_total %d", stats.GetChecks())),
-	}, {
-		Name:     "Errors Metric",
-		URL:      "/metrics",
-		Method:   "GET",
-		Status:   http.StatusOK,
-		Contains: regexp.MustCompile(fmt.Sprintf("rclone_errors_total %d", stats.GetErrors())),
-	}, {
-		Name:     "Deleted Files Metric",
-		URL:      "/metrics",
-		Method:   "GET",
-		Status:   http.StatusOK,
-		Contains: regexp.MustCompile(fmt.Sprintf("rclone_files_deleted_total %d", stats.Deletes(0))),
-	}, {
-		Name:     "Files Transferred Metric",
-		URL:      "/metrics",
-		Method:   "GET",
-		Status:   http.StatusOK,
-		Contains: regexp.MustCompile(fmt.Sprintf("rclone_files_transferred_total %d", stats.GetTransfers())),
-	},
-	}
-	return
 }
 
 var matchRemoteDirListing = regexp.MustCompile(`<title>Directory listing of /</title>`)
@@ -733,20 +748,40 @@ func TestNoAuth(t *testing.T) {
 
 func TestWithUserPass(t *testing.T) {
 	tests := []testRun{{
-		Name:        "auth",
+		Name:        "authMissing",
+		URL:         "rc/noopauth",
+		Method:      "POST",
+		Body:        `{}`,
+		ContentType: "application/javascript",
+		Status:      http.StatusUnauthorized,
+		Expected:    "401 Unauthorized\n",
+	}, {
+		Name:        "authWrong",
+		URL:         "rc/noopauth",
+		Method:      "POST",
+		Body:        `{}`,
+		ContentType: "application/javascript",
+		Status:      http.StatusUnauthorized,
+		Expected:    "401 Unauthorized\n",
+		User:        "user1",
+		Pass:        "pass2",
+	}, {
+		Name:        "authOK",
 		URL:         "rc/noopauth",
 		Method:      "POST",
 		Body:        `{}`,
 		ContentType: "application/javascript",
 		Status:      http.StatusOK,
 		Expected:    "{}\n",
+		User:        "user",
+		Pass:        "pass",
 	}}
 	opt := newTestOpt()
 	opt.Serve = false
 	opt.Files = ""
 	opt.NoAuth = false
-	opt.HTTPOptions.BasicUser = "user"
-	opt.HTTPOptions.BasicPass = "pass"
+	opt.Auth.BasicUser = "user"
+	opt.Auth.BasicPass = "pass"
 	testServer(t, tests, &opt)
 }
 
@@ -780,4 +815,107 @@ func TestRCAsync(t *testing.T) {
 	opt.Serve = true
 	opt.Files = ""
 	testServer(t, tests, &opt)
+}
+
+// Check the debug handlers are attached
+func TestRCDebug(t *testing.T) {
+	tests := []testRun{{
+		Name:        "index",
+		URL:         "debug/pprof/",
+		Method:      "GET",
+		ContentType: "text/html",
+		Status:      http.StatusOK,
+		Contains:    regexp.MustCompile(`Types of profiles available`),
+	}, {
+		Name:        "goroutines",
+		URL:         "debug/pprof/goroutine?debug=1",
+		Method:      "GET",
+		ContentType: "text/html",
+		Status:      http.StatusOK,
+		Contains:    regexp.MustCompile(`goroutine profile`),
+	}}
+	opt := newTestOpt()
+	opt.Serve = true
+	opt.Files = ""
+	testServer(t, tests, &opt)
+}
+
+func TestServeModTime(t *testing.T) {
+	for file, mtime := range map[string]time.Time{
+		"dir":         time.Date(2023, 4, 12, 21, 15, 17, 0, time.UTC),
+		"modtime.txt": time.Date(2021, 1, 18, 5, 2, 28, 0, time.UTC),
+	} {
+		path := filepath.Join(testFs, "modtime", file)
+		err := os.Chtimes(path, mtime, mtime)
+		require.NoError(t, err)
+	}
+
+	opt := newTestOpt()
+	opt.Serve = true
+	opt.Template.Path = "testdata/golden/testmodtime.html"
+
+	tests := []testRun{{
+		Name:     "modtime",
+		Method:   "GET",
+		URL:      remoteURL + "modtime/",
+		Status:   http.StatusOK,
+		Expected: "* dir/ - 2023-04-12T21:15:17Z\n* modtime.txt - 2021-01-18T05:02:28Z\n",
+	}}
+	testServer(t, tests, &opt)
+
+	opt.ServeNoModTime = true
+	tests = []testRun{{
+		Name:     "no modtime",
+		Method:   "GET",
+		URL:      remoteURL + "modtime/",
+		Status:   http.StatusOK,
+		Expected: "* dir/ - 0001-01-01T00:00:00Z\n* modtime.txt - 0001-01-01T00:00:00Z\n",
+	}}
+	testServer(t, tests, &opt)
+}
+
+func TestContentTypeJSON(t *testing.T) {
+	tests := []testRun{
+		{
+			Name:        "Check Content-Type for JSON response",
+			URL:         "rc/noop",
+			Method:      "POST",
+			Body:        `{}`,
+			ContentType: "application/json",
+			Status:      http.StatusOK,
+			Expected:    "{}\n",
+			Headers: map[string]string{
+				"Content-Type": "application/json",
+			},
+		},
+		{
+			Name:        "Check Content-Type for JSON error response",
+			URL:         "rc/error",
+			Method:      "POST",
+			Body:        `{}`,
+			ContentType: "application/json",
+			Status:      http.StatusInternalServerError,
+			Expected: `{
+				"error": "arbitrary error on input map[]",
+				"input": {},
+				"path": "rc/error",
+				"status": 500
+			}
+			`,
+			Headers: map[string]string{
+				"Content-Type": "application/json",
+			},
+		},
+	}
+	opt := newTestOpt()
+	testServer(t, tests, &opt)
+}
+
+func normalizeJSON(t *testing.T, jsonStr string) string {
+	var jsonObj map[string]any
+	err := json.Unmarshal([]byte(jsonStr), &jsonObj)
+	require.NoError(t, err, "JSON unmarshalling failed")
+	normalizedJSON, err := json.Marshal(jsonObj)
+	require.NoError(t, err, "JSON marshalling failed")
+	return string(normalizedJSON)
 }

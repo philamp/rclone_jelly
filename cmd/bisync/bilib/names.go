@@ -2,13 +2,13 @@ package bilib
 
 import (
 	"bytes"
-	"io/ioutil"
+	"os"
 	"sort"
 	"strconv"
 )
 
 // Names comprises a set of file names
-type Names map[string]interface{}
+type Names map[string]any
 
 // ToNames converts string slice to a set of names
 func ToNames(list []string) Names {
@@ -57,5 +57,29 @@ func SaveList(list []string, path string) error {
 		_, _ = buf.WriteString(strconv.Quote(s))
 		_ = buf.WriteByte('\n')
 	}
-	return ioutil.WriteFile(path, buf.Bytes(), PermSecure)
+	return os.WriteFile(path, buf.Bytes(), PermSecure)
+}
+
+// AliasMap comprises a pair of names that are not equal but treated as equal for comparison purposes
+// For example, when normalizing unicode and casing
+// This helps reduce repeated normalization functions, which really slow things down
+type AliasMap map[string]string
+
+// Add adds new pair to the set, in both directions
+func (am AliasMap) Add(name1, name2 string) {
+	if name1 != name2 {
+		am[name1] = name2
+		am[name2] = name1
+	}
+}
+
+// Alias returns the alternate version, if any, else the original.
+func (am AliasMap) Alias(name1 string) string {
+	// note: we don't need to check normalization settings, because we already did it in March.
+	// the AliasMap will only exist if March paired up two unequal filenames.
+	name2, ok := am[name1]
+	if ok {
+		return name2
+	}
+	return name1
 }

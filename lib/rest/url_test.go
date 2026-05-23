@@ -59,3 +59,30 @@ func TestURLPathEscape(t *testing.T) {
 		assert.Equal(t, test.want, got, fmt.Sprintf("Test %d path = %q", i, test.path))
 	}
 }
+
+func TestURLPathEscapeAll(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"", ""},
+		// RFC 3986 unreserved characters must not be encoded
+		{"/hello.txt", "/hello.txt"},
+		{"file-name_v2.~bak", "file-name_v2.~bak"},
+		// Reserved and other characters must be encoded
+		{"With Space", "With%20Space"},
+		{"With Colon:", "With%20Colon%3A"},
+		{"With Percent%", "With%20Percent%25"},
+		{"abc/XYZ123", "abc/XYZ123"},
+		{"hello world", "hello%20world"},
+		{"$test", "%24test"},
+		{"ümlaut", "%C3%BCmlaut"},
+		{"", ""},
+		{" /?", "%20/%3F"},
+	}
+
+	for _, test := range tests {
+		got := URLPathEscapeAll(test.in)
+		assert.Equal(t, test.want, got)
+	}
+}

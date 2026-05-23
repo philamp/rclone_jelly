@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,8 +25,9 @@ import (
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/config/obscure"
 	"github.com/rclone/rclone/fs/fserrors"
+	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
-	"github.com/rclone/rclone/fs/walk"
+	"github.com/rclone/rclone/fs/list"
 	"github.com/rclone/rclone/lib/dircache"
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/oauthutil"
@@ -46,12 +48,10 @@ const (
 // Globals
 var (
 	// Description of how to auth for this app
-	oauthConfig = &oauth2.Config{
-		Scopes: nil,
-		Endpoint: oauth2.Endpoint{
-			AuthURL: "https://my.pcloud.com/oauth2/authorize",
-			// TokenURL: "https://api.pcloud.com/oauth2_token", set by updateTokenURL
-		},
+	oauthConfig = &oauthutil.Config{
+		Scopes:  nil,
+		AuthURL: "https://my.pcloud.com/oauth2/authorize",
+		// TokenURL: "https://api.pcloud.com/oauth2_token", set by updateTokenURL
 		ClientID:     rcloneClientID,
 		ClientSecret: obscure.MustReveal(rcloneEncryptedClientSecret),
 		RedirectURL:  oauthutil.RedirectLocalhostURL,
@@ -59,8 +59,8 @@ var (
 )
 
 // Update the TokenURL with the actual hostname
-func updateTokenURL(oauthConfig *oauth2.Config, hostname string) {
-	oauthConfig.Endpoint.TokenURL = "https://" + hostname + "/oauth2_token"
+func updateTokenURL(oauthConfig *oauthutil.Config, hostname string) {
+	oauthConfig.TokenURL = "https://" + hostname + "/oauth2_token"
 }
 
 // Register with Fs
@@ -77,7 +77,7 @@ func init() {
 				fs.Errorf(nil, "Failed to read config: %v", err)
 			}
 			updateTokenURL(oauthConfig, optc.Hostname)
-			checkAuth := func(oauthConfig *oauth2.Config, auth *oauthutil.AuthResult) error {
+			checkAuth := func(oauthConfig *oauthutil.Config, auth *oauthutil.AuthResult) error {
 				if auth == nil || auth.Form == nil {
 					return errors.New("form not found in response")
 				}
@@ -109,10 +109,11 @@ func init() {
 				encoder.EncodeBackSlash |
 				encoder.EncodeInvalidUtf8),
 		}, {
-			Name:     "root_folder_id",
-			Help:     "Fill in for rclone to use a non root folder as its starting point.",
-			Default:  "d0",
-			Advanced: true,
+			Name:      "root_folder_id",
+			Help:      "Fill in for rclone to use a non root folder as its starting point.",
+			Default:   "d0",
+			Advanced:  true,
+			Sensitive: true,
 		}, {
 			Name: "hostname",
 			Help: `Hostname to connect to.
@@ -130,7 +131,22 @@ with rclone authorize.
 				Value: "eapi.pcloud.com",
 				Help:  "EU region",
 			}},
-		}}...),
+		}, {
+			Name: "username",
+			Help: `Your pcloud username.
+			
+This is only required when you want to use the cleanup command. Due to a bug
+in the pcloud API the required API does not support OAuth authentication so
+we have to rely on user password authentication for it.`,
+			Advanced:  true,
+			Sensitive: true,
+		}, {
+			Name:       "password",
+			Help:       "Your pcloud password.",
+			IsPassword: true,
+			Advanced:   true,
+		},
+		}...),
 	})
 }
 
@@ -139,18 +155,23 @@ type Options struct {
 	Enc          encoder.MultiEncoder `config:"encoding"`
 	RootFolderID string               `config:"root_folder_id"`
 	Hostname     string               `config:"hostname"`
+	Username     string               `config:"username"`
+	Password     string               `config:"password"`
 }
 
 // Fs represents a remote pcloud
 type Fs struct {
-	name         string             // name of this remote
-	root         string             // the path we are working on
-	opt          Options            // parsed options
-	features     *fs.Features       // optional features
-	srv          *rest.Client       // the connection to the server
-	dirCache     *dircache.DirCache // Map of directory path to directory id
-	pacer        *fs.Pacer          // pacer for API calls
-	tokenRenewer *oauthutil.Renew   // renew the token on expiry
+	name         string                 // name of this remote
+	root         string                 // the path we are working on
+	opt          Options                // parsed options
+	features     *fs.Features           // optional features
+	ts           *oauthutil.TokenSource // the token source, used to create new clients
+	srv          *rest.Client           // the connection to the server
+	cleanupSrv   *rest.Client           // the connection used for the cleanup method
+	dirCache     *dircache.DirCache     // Map of directory path to directory id
+	pacer        *fs.Pacer              // pacer for API calls
+	tokenRenewer *oauthutil.Renew       // renew the token on expiry
+	lastDiffID   int64                  // change tracking state for diff long-polling
 }
 
 // Object describes a pcloud object
@@ -217,6 +238,10 @@ func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, err
 
 	// Check if it is an api.Error
 	if apiErr, ok := err.(*api.Error); ok {
+		// Handle error 1101 specifically - don't retry as it's a permanent API restriction
+		if apiErr.Result == 1101 {
+			return false, err
+		}
 		// See https://docs.pcloud.com/errors/ for error treatment
 		// Errors are classified as 1xxx, 2xxx, etc.
 		switch apiErr.Result / 1000 {
@@ -227,7 +252,7 @@ func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, err
 		}
 	}
 
-	if resp != nil && resp.StatusCode == 401 && len(resp.Header["Www-Authenticate"]) == 1 && strings.Index(resp.Header["Www-Authenticate"][0], "expired_token") >= 0 {
+	if resp != nil && resp.StatusCode == 401 && len(resp.Header["Www-Authenticate"]) == 1 && strings.Contains(resp.Header["Www-Authenticate"][0], "expired_token") {
 		doRetry = true
 		fs.Debugf(nil, "Should retry: %v", err)
 	}
@@ -293,21 +318,30 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 	updateTokenURL(oauthConfig, opt.Hostname)
 
+	canCleanup := opt.Username != "" && opt.Password != ""
 	f := &Fs{
 		name:  name,
 		root:  root,
 		opt:   *opt,
+		ts:    ts,
 		srv:   rest.NewClient(oAuthClient).SetRoot("https://" + opt.Hostname),
 		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+	}
+	if canCleanup {
+		f.cleanupSrv = rest.NewClient(fshttp.NewClient(ctx)).SetRoot("https://" + opt.Hostname)
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         false,
 		CanHaveEmptyDirectories: true,
+		PartialUploads:          true,
 	}).Fill(ctx, f)
+	if !canCleanup {
+		f.features.CleanUp = nil
+	}
 	f.srv.SetErrorHandler(errorHandler)
 
 	// Renew the token in the background
-	f.tokenRenewer = oauthutil.NewRenew(f.String(), ts, func() error {
+	f.tokenRenewer = oauthutil.NewRenew(f.String(), f.ts, func() error {
 		_, err := f.readMetaDataForPath(ctx, "")
 		return err
 	})
@@ -347,6 +381,65 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		return f, fs.ErrorIsFile
 	}
 	return f, nil
+}
+
+// XOpenWriterAt opens with a handle for random access writes
+//
+// Pass in the remote desired and the size if known.
+//
+// It truncates any existing object.
+//
+// OpenWriterAt disabled because it seems to have been disabled at pcloud
+// PUT /file_open?flags=XXX&folderid=XXX&name=XXX HTTP/1.1
+//
+//	{
+//	        "result": 2003,
+//	        "error": "Access denied. You do not have permissions to perform this operation."
+//	}
+func (f *Fs) XOpenWriterAt(ctx context.Context, remote string, size int64) (fs.WriterAtCloser, error) {
+	client, err := f.newSingleConnClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create client: %w", err)
+	}
+	// init an empty file
+	leaf, directoryID, err := f.dirCache.FindPath(ctx, remote, true)
+	if err != nil {
+		return nil, fmt.Errorf("resolve src: %w", err)
+	}
+	openResult, err := fileOpenNew(ctx, client, f, directoryID, leaf)
+	if err != nil {
+		return nil, fmt.Errorf("open file: %w", err)
+	}
+	if _, err := fileClose(ctx, client, f.pacer, openResult.FileDescriptor); err != nil {
+		return nil, fmt.Errorf("close file: %w", err)
+	}
+
+	writer := &writerAt{
+		ctx:    ctx,
+		fs:     f,
+		size:   size,
+		remote: remote,
+		fileID: openResult.Fileid,
+	}
+
+	return writer, nil
+}
+
+// Create a new http client, accepting keep-alive headers, limited to single connection.
+// Necessary for pcloud fileops API, as it binds the session to the underlying TCP connection.
+// File descriptors are only valid within the same connection and auto-closed when the connection is closed,
+// hence we need a separate client (with single connection) for each fd to avoid all sorts of errors and race conditions.
+func (f *Fs) newSingleConnClient(ctx context.Context) (*rest.Client, error) {
+	baseClient := fshttp.NewClient(ctx)
+	baseClient.Transport = fshttp.NewTransportCustom(ctx, func(t *http.Transport) {
+		t.MaxConnsPerHost = 1
+		t.DisableKeepAlives = false
+	})
+	// Set our own http client in the context
+	ctx = oauthutil.Context(ctx, baseClient)
+	// create a new oauth client, reuse the token source
+	oAuthClient := oauth2.NewClient(ctx, f.ts)
+	return rest.NewClient(oAuthClient).SetRoot("https://" + f.opt.Hostname), nil
 }
 
 // Return an Object from a path
@@ -442,10 +535,63 @@ func fileIDtoNumber(fileID string) string {
 // Should return true to finish processing
 type listAllFn func(*api.Item) bool
 
+// listAllRootRecursive handles recursive listing for root directory (folderid=0)
+// using a two-step approach to work around pCloud API limitation
+func (f *Fs) listAllRootRecursive(ctx context.Context, dirID string, directoriesOnly bool, filesOnly bool, fn listAllFn) (found bool, err error) {
+	// List root directory non-recursively to get immediate contents
+	var rootSubdirs []*api.Item
+	found, err = f.listAll(ctx, dirID, false, false, false, func(item *api.Item) bool {
+		if item.IsFolder {
+			// Store subdirectories for recursive list later
+			rootSubdirs = append(rootSubdirs, item)
+			// Handle directories immediately if not filesOnly
+			if !filesOnly {
+				if fn(item) {
+					return true // stop iteration
+				}
+			}
+		} else if !directoriesOnly {
+			// Handle files immediately if not directoriesOnly
+			if fn(item) {
+				return true // stop iteration
+			}
+		}
+		return false // continue iteration
+	})
+	if err != nil || found {
+		return found, err
+	}
+
+	// Recursively list each subdirectory
+	for _, subdir := range rootSubdirs {
+		subdirName := f.opt.Enc.ToStandardName(subdir.Name)
+		found, err = f.listAll(ctx, subdir.ID, directoriesOnly, filesOnly, true, func(item *api.Item) bool {
+			// Prepend the subdirectory name to create correct relative path
+			origItemName := item.Name
+			item.Name = subdirName + "/" + item.Name
+			result := fn(item)
+			item.Name = origItemName
+			return result
+		})
+		if err != nil || found {
+			return found, err
+		}
+	}
+
+	return found, nil
+}
+
 // Lists the directory required calling the user function on each item found
 //
 // If the user fn ever returns true then it early exits with found = true
 func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, filesOnly bool, recursive bool, fn listAllFn) (found bool, err error) {
+	// Special case: root directory with recursive listing
+	// pCloud API rejects folderid=0 with recursive=1 (error 1101)
+	// See: https://github.com/rclone/rclone/issues/9315
+	if recursive && dirIDtoNumber(dirID) == "0" {
+		return f.listAllRootRecursive(ctx, dirID, directoriesOnly, filesOnly, fn)
+	}
+
 	opts := rest.Opts{
 		Method:     "GET",
 		Path:       "/listfolder",
@@ -541,17 +687,37 @@ func (f *Fs) listHelper(ctx context.Context, dir string, recursive bool, callbac
 // This should return ErrDirNotFound if the directory isn't
 // found.
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
+	return list.WithListP(ctx, dir, f)
+}
+
+// ListP lists the objects and directories of the Fs starting
+// from dir non recursively into out.
+//
+// dir should be "" to start from the root, and should not
+// have trailing slashes.
+//
+// This should return ErrDirNotFound if the directory isn't
+// found.
+//
+// It should call callback for each tranche of entries read.
+// These need not be returned in any particular order.  If
+// callback returns an error then the listing will stop
+// immediately.
+func (f *Fs) ListP(ctx context.Context, dir string, callback fs.ListRCallback) (err error) {
+	list := list.NewHelper(callback)
 	err = f.listHelper(ctx, dir, false, func(o fs.DirEntry) error {
-		entries = append(entries, o)
-		return nil
+		return list.Add(o)
 	})
-	return entries, err
+	if err != nil {
+		return err
+	}
+	return list.Flush()
 }
 
 // ListR lists the objects and directories of the Fs starting
 // from dir recursively into out.
 func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (err error) {
-	list := walk.NewListRHelper(callback)
+	list := list.NewHelper(callback)
 	err = f.listHelper(ctx, dir, true, func(o fs.DirEntry) error {
 		return list.Add(o)
 	})
@@ -564,7 +730,7 @@ func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (
 // Creates from the parameters passed in a half finished Object which
 // must have setMetaData called on it
 //
-// Returns the object, leaf, directoryID and error
+// Returns the object, leaf, directoryID and error.
 //
 // Used to create new objects
 func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time, size int64) (o *Object, leaf string, directoryID string, err error) {
@@ -583,7 +749,7 @@ func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time,
 
 // Put the object into the container
 //
-// Copy the reader in to the new object which is returned
+// Copy the reader in to the new object which is returned.
 //
 // The new object may have been created if an error is returned
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
@@ -657,9 +823,9 @@ func (f *Fs) Precision() time.Duration {
 
 // Copy src to this remote using server-side copy operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -729,10 +895,12 @@ func (f *Fs) CleanUp(ctx context.Context) error {
 		Parameters: url.Values{},
 	}
 	opts.Parameters.Set("folderid", dirIDtoNumber(rootID))
+	opts.Parameters.Set("username", f.opt.Username)
+	opts.Parameters.Set("password", obscure.MustReveal(f.opt.Password))
 	var resp *http.Response
 	var result api.Error
 	return f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
+		resp, err = f.cleanupSrv.CallJSON(ctx, &opts, nil, &result)
 		err = result.Update(err)
 		return shouldRetry(ctx, resp, err)
 	})
@@ -740,9 +908,9 @@ func (f *Fs) CleanUp(ctx context.Context) error {
 
 // Move src to this remote using server-side move operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -908,12 +1076,150 @@ func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
 	if err != nil {
 		return nil, err
 	}
+	free := max(q.Quota-q.UsedQuota, 0)
 	usage = &fs.Usage{
-		Total: fs.NewUsageValue(q.Quota),               // quota of bytes that can be used
-		Used:  fs.NewUsageValue(q.UsedQuota),           // bytes in use
-		Free:  fs.NewUsageValue(q.Quota - q.UsedQuota), // bytes which can be uploaded before reaching the quota
+		Total: fs.NewUsageValue(q.Quota),     // quota of bytes that can be used
+		Used:  fs.NewUsageValue(q.UsedQuota), // bytes in use
+		Free:  fs.NewUsageValue(free),        // bytes which can be uploaded before reaching the quota
 	}
 	return usage, nil
+}
+
+// Shutdown shutdown the fs
+func (f *Fs) Shutdown(ctx context.Context) error {
+	f.tokenRenewer.Shutdown()
+	return nil
+}
+
+// ChangeNotify implements fs.Features.ChangeNotify
+func (f *Fs) ChangeNotify(ctx context.Context, notify func(string, fs.EntryType), ch <-chan time.Duration) {
+	// Start long-poll loop in background
+	go f.changeNotifyLoop(ctx, notify, ch)
+}
+
+// changeNotifyLoop contains the blocking long-poll logic.
+func (f *Fs) changeNotifyLoop(ctx context.Context, notify func(string, fs.EntryType), ch <-chan time.Duration) {
+	// Standard polling interval
+	interval := 30 * time.Second
+
+	// Start with diffID = 0 to get the current state
+	var diffID int64
+
+	// Helper to process changes from the diff API
+	handleChanges := func(entries []map[string]any) {
+		notifiedPaths := make(map[string]bool)
+
+		for _, entry := range entries {
+			meta, ok := entry["metadata"].(map[string]any)
+			if !ok {
+				continue
+			}
+
+			// Robust extraction of ParentFolderID
+			var pid int64
+			if val, ok := meta["parentfolderid"]; ok {
+				switch v := val.(type) {
+				case float64:
+					pid = int64(v)
+				case int64:
+					pid = v
+				case int:
+					pid = int64(v)
+				}
+			}
+
+			// Resolve the path using dirCache.GetInv
+			// pCloud uses "d" prefix for directory IDs in cache, but API returns numbers
+			dirID := fmt.Sprintf("d%d", pid)
+			parentPath, ok := f.dirCache.GetInv(dirID)
+
+			if !ok {
+				// Parent not in cache, so we can ignore this change as it is outside
+				// of what the mount has seen or cares about.
+				continue
+			}
+
+			name, _ := meta["name"].(string)
+			fullPath := path.Join(parentPath, name)
+
+			// Determine EntryType (File or Directory)
+			entryType := fs.EntryObject
+			if isFolder, ok := meta["isfolder"].(bool); ok && isFolder {
+				entryType = fs.EntryDirectory
+			}
+
+			// Deduplicate notifications for this batch
+			if !notifiedPaths[fullPath] {
+				fs.Debugf(f, "ChangeNotify: detected change in %q (type: %v)", fullPath, entryType)
+				notify(fullPath, entryType)
+				notifiedPaths[fullPath] = true
+			}
+		}
+	}
+
+	for {
+		// Check context and channel
+		select {
+		case <-ctx.Done():
+			return
+		case newInterval, ok := <-ch:
+			if !ok {
+				return
+			}
+			interval = newInterval
+		default:
+		}
+
+		// Setup /diff Request
+		opts := rest.Opts{
+			Method:     "GET",
+			Path:       "/diff",
+			Parameters: url.Values{},
+		}
+
+		if diffID != 0 {
+			opts.Parameters.Set("diffid", strconv.FormatInt(diffID, 10))
+			opts.Parameters.Set("block", "1")
+		} else {
+			opts.Parameters.Set("last", "0")
+		}
+
+		// Perform Long-Poll
+		// Timeout set to 90s (server usually blocks for 60s max)
+		reqCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+		var result api.DiffResult
+
+		_, err := f.srv.CallJSON(reqCtx, &opts, nil, &result)
+		cancel()
+
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			// Ignore timeout errors as they are normal for long-polling
+			if !errors.Is(err, context.DeadlineExceeded) {
+				fs.Infof(f, "ChangeNotify: polling error: %v. Waiting %v.", err, interval)
+				time.Sleep(interval)
+			}
+			continue
+		}
+
+		// If result is not 0, reset DiffID to resync
+		if result.Result != 0 {
+			diffID = 0
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		if result.DiffID != 0 {
+			diffID = result.DiffID
+			f.lastDiffID = diffID
+		}
+
+		if len(result.Entries) > 0 {
+			handleChanges(result.Entries)
+		}
+	}
 }
 
 // Hashes returns the supported hash sets.
@@ -1043,7 +1349,6 @@ func (o *Object) readMetaData(ctx context.Context) (err error) {
 
 // ModTime returns the modification time of the object
 //
-//
 // It attempts to read the objects mtime and if that isn't present the
 // LastModified returned in the http headers
 func (o *Object) ModTime(ctx context.Context) time.Time {
@@ -1057,9 +1362,42 @@ func (o *Object) ModTime(ctx context.Context) time.Time {
 
 // SetModTime sets the modification time of the local fs object
 func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
-	// Pcloud doesn't have a way of doing this so returning this
-	// error will cause the file to be re-uploaded to set the time.
-	return fs.ErrorCantSetModTime
+	filename, directoryID, err := o.fs.dirCache.FindPath(ctx, o.Remote(), true)
+	if err != nil {
+		return err
+	}
+	fileID := fileIDtoNumber(o.id)
+	filename = o.fs.opt.Enc.FromStandardName(filename)
+	opts := rest.Opts{
+		Method:           "PUT",
+		Path:             "/copyfile",
+		Parameters:       url.Values{},
+		TransferEncoding: []string{"identity"}, // pcloud doesn't like chunked encoding
+		ExtraHeaders: map[string]string{
+			"Connection": "keep-alive",
+		},
+	}
+	opts.Parameters.Set("fileid", fileID)
+	opts.Parameters.Set("folderid", dirIDtoNumber(directoryID))
+	opts.Parameters.Set("toname", filename)
+	opts.Parameters.Set("tofolderid", dirIDtoNumber(directoryID))
+	opts.Parameters.Set("ctime", strconv.FormatInt(modTime.Unix(), 10))
+	opts.Parameters.Set("mtime", strconv.FormatInt(modTime.Unix(), 10))
+
+	result := &api.ItemResult{}
+	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
+		resp, err := o.fs.srv.CallJSON(ctx, &opts, nil, result)
+		err = result.Error.Update(err)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return fmt.Errorf("update mtime: copyfile: %w", err)
+	}
+	if err := o.setMetaData(&result.Metadata); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Storable returns a boolean showing whether this object storable
@@ -1122,7 +1460,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 
 // Update the object with the contents of the io.Reader, modTime and size
 //
-// If existing is set then it updates the object rather than creating a new one
+// If existing is set then it updates the object rather than creating a new one.
 //
 // The new object may have been created if an error is returned
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
@@ -1178,7 +1516,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	// opts.Body=0), so upload it as a multipart form POST with
 	// Content-Length set.
 	if size == 0 {
-		formReader, contentType, overhead, err := rest.MultipartUpload(ctx, in, opts.Parameters, "content", leaf)
+		formReader, contentType, overhead, err := rest.MultipartUpload(ctx, in, opts.Parameters, "content", leaf, opts.ContentType)
 		if err != nil {
 			return fmt.Errorf("failed to make multipart upload for 0 length file: %w", err)
 		}
@@ -1200,7 +1538,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	if err != nil {
 		// sometimes pcloud leaves a half complete file on
 		// error, so delete it if it exists, trying a few times
-		for i := 0; i < 5; i++ {
+		for range 5 {
 			delObj, delErr := o.fs.NewObject(ctx, o.remote)
 			if delErr == nil && delObj != nil {
 				_ = delObj.Remove(ctx)
@@ -1248,7 +1586,11 @@ var (
 	_ fs.DirMover        = (*Fs)(nil)
 	_ fs.DirCacheFlusher = (*Fs)(nil)
 	_ fs.PublicLinker    = (*Fs)(nil)
+	_ fs.ListRer         = (*Fs)(nil)
+	_ fs.ListPer         = (*Fs)(nil)
 	_ fs.Abouter         = (*Fs)(nil)
+	_ fs.Shutdowner      = (*Fs)(nil)
+	_ fs.ChangeNotifier  = (*Fs)(nil)
 	_ fs.Object          = (*Object)(nil)
 	_ fs.IDer            = (*Object)(nil)
 )

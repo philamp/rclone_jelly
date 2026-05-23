@@ -1,13 +1,15 @@
 ---
 title: "Mailru"
 description: "Mail.ru Cloud"
+versionIntroduced: "v1.50"
 ---
 
-# {{< icon "fas fa-at" >}} Mail.ru Cloud
+# Mail.ru Cloud
 
-[Mail.ru Cloud](https://cloud.mail.ru/) is a cloud storage provided by a Russian internet company [Mail.Ru Group](https://mail.ru). The official desktop client is [Disk-O:](https://disk-o.cloud/en), available on Windows and Mac OS.
-
-Currently it is recommended to disable 2FA on Mail.ru accounts intended for rclone until it gets eventually implemented.
+[Mail.ru Cloud](https://cloud.mail.ru/) is a cloud storage provided by a
+Russian internet company [Mail.Ru Group](https://mail.ru). The official
+desktop client is [Disk-O:](https://disk-o.cloud/en), available on Windows
+and Mac OS.
 
 ## Features highlights
 
@@ -15,23 +17,44 @@ Currently it is recommended to disable 2FA on Mail.ru accounts intended for rclo
 - Files have a `last modified time` property, directories don't
 - Deleted files are by default moved to the trash
 - Files and directories can be shared via public links
-- Partial uploads or streaming are not supported, file size must be known before upload
+- Partial uploads or streaming are not supported, file size must be known before
+  upload
 - Maximum file size is limited to 2G for a free account, unlimited for paid accounts
 - Storage keeps hash for all files and performs transparent deduplication,
   the hash algorithm is a modified SHA1
-- If a particular file is already present in storage, one can quickly submit file hash
-  instead of long file upload (this optimization is supported by rclone)
+- If a particular file is already present in storage, one can quickly submit file
+  hash instead of long file upload (this optimization is supported by rclone)
 
 ## Configuration
 
-Here is an example of making a mailru configuration. First create a Mail.ru Cloud
-account and choose a tariff, then run
+Here is an example of making a mailru configuration.
 
-    rclone config
+First create a Mail.ru Cloud account and choose a tariff.
+
+You will need to log in and create an app password for rclone. Rclone
+**will not work** with your normal username and password - it will
+give an error like `oauth2: server response missing access_token`.
+
+- Click on your user icon in the top right
+- Go to Security / "Пароль и безопасность"
+- Click password for apps / "Пароли для внешних приложений"
+- Add the password - give it a name - eg "rclone"
+- Select the permissions level. For some reason just "Full access to Cloud"
+  (WebDav) doesn't work for Rclone currently. You have to select "Full access
+  to Mail, Cloud and Calendar" (all protocols).
+  ([thread on forum.rclone.org](https://forum.rclone.org/t/failed-to-create-file-system-for-mailru-failed-to-authorize-oauth2-invalid-username-or-password-username-or-password-is-incorrect/49298))
+- Copy the password and use this password below - your normal login password
+  won't work.
+
+Now run
+
+```console
+rclone config
+```
 
 This will guide you through an interactive setup process:
 
-```
+```text
 No remotes found, make a new one?
 n) New remote
 s) Set configuration password
@@ -51,6 +74,10 @@ User name (usually email)
 Enter a string value. Press Enter for the default ("").
 user> username@mail.ru
 Password
+
+This must be an app password - rclone will not work with your normal
+password. See the Configuration section in the docs for how to make an
+app password.
 y) Yes type in my own password
 g) Generate random password
 y/g> y
@@ -74,13 +101,13 @@ y) Yes
 n) No
 y/n> n
 Remote config
---------------------
-[remote]
-type = mailru
-user = username@mail.ru
-pass = *** ENCRYPTED ***
-speedup_enable = true
---------------------
+Configuration complete.
+Options:
+- type: mailru
+- user: username@mail.ru
+- pass: *** ENCRYPTED ***
+- speedup_enable: true
+Keep this "remote" remote?
 y) Yes this is OK
 e) Edit this remote
 d) Delete this remote
@@ -92,32 +119,38 @@ You can use the configured backend as shown below:
 
 See top level directories
 
-    rclone lsd remote:
+```console
+rclone lsd remote:
+```
 
 Make a new directory
 
-    rclone mkdir remote:directory
+```console
+rclone mkdir remote:directory
+```
 
 List the contents of a directory
 
-    rclone ls remote:directory
+```console
+rclone ls remote:directory
+```
 
 Sync `/home/local/directory` to the remote path, deleting any
 excess files in the path.
 
-    rclone sync -i /home/local/directory remote:directory
+```console
+rclone sync --interactive /home/local/directory remote:directory
+```
 
-### Modified time
+### Modification times and hashes
 
 Files support a modification time attribute with up to 1 second precision.
 Directories do not have a modification time, which is shown as "Jan 1 1970".
 
-### Hash checksums
-
-Hash sums use a custom Mail.ru algorithm based on SHA1.
+File hashes are supported, with a custom Mail.ru algorithm based on SHA1.
 If file size is less than or equal to the SHA1 block size (20 bytes),
 its hash is simply its data right-padded with zero bytes.
-Hash sum of a larger file is computed as a SHA1 sum of the file data
+Hashes of a larger file is computed as a SHA1 of the file data
 bytes concatenated with a decimal representation of the data length.
 
 ### Emptying Trash
@@ -153,10 +186,36 @@ the following characters are also replaced:
 Invalid UTF-8 bytes will also be [replaced](/overview/#invalid-utf8),
 as they can't be used in JSON strings.
 
-{{< rem autogenerated options start" - DO NOT EDIT - instead edit fs.RegInfo in backend/mailru/mailru.go then run make backenddocs" >}}
+<!-- autogenerated options start - DO NOT EDIT - instead edit fs.RegInfo in backend/mailru/mailru.go and run make backenddocs to verify --> <!-- markdownlint-disable-line line-length -->
 ### Standard options
 
-Here are the standard options specific to mailru (Mail.ru Cloud).
+Here are the Standard options specific to mailru (Mail.ru Cloud).
+
+#### --mailru-client-id
+
+OAuth Client Id.
+
+Leave blank normally.
+
+Properties:
+
+- Config:      client_id
+- Env Var:     RCLONE_MAILRU_CLIENT_ID
+- Type:        string
+- Required:    false
+
+#### --mailru-client-secret
+
+OAuth Client Secret.
+
+Leave blank normally.
+
+Properties:
+
+- Config:      client_secret
+- Env Var:     RCLONE_MAILRU_CLIENT_SECRET
+- Type:        string
+- Required:    false
 
 #### --mailru-user
 
@@ -172,6 +231,11 @@ Properties:
 #### --mailru-pass
 
 Password.
+
+This must be an app password - rclone will not work with your normal
+password. See the Configuration section in the docs for how to make an
+app password.
+
 
 **NB** Input to this must be obscured - see [rclone obscure](/commands/rclone_obscure/).
 
@@ -202,14 +266,66 @@ Properties:
 - Type:        bool
 - Default:     true
 - Examples:
-    - "true"
-        - Enable
-    - "false"
-        - Disable
+  - "true"
+    - Enable
+  - "false"
+    - Disable
 
 ### Advanced options
 
-Here are the advanced options specific to mailru (Mail.ru Cloud).
+Here are the Advanced options specific to mailru (Mail.ru Cloud).
+
+#### --mailru-token
+
+OAuth Access Token as a JSON blob.
+
+Properties:
+
+- Config:      token
+- Env Var:     RCLONE_MAILRU_TOKEN
+- Type:        string
+- Required:    false
+
+#### --mailru-auth-url
+
+Auth server URL.
+
+Leave blank to use the provider defaults.
+
+Properties:
+
+- Config:      auth_url
+- Env Var:     RCLONE_MAILRU_AUTH_URL
+- Type:        string
+- Required:    false
+
+#### --mailru-token-url
+
+Token server url.
+
+Leave blank to use the provider defaults.
+
+Properties:
+
+- Config:      token_url
+- Env Var:     RCLONE_MAILRU_TOKEN_URL
+- Type:        string
+- Required:    false
+
+#### --mailru-client-credentials
+
+Use client credentials OAuth flow.
+
+This will use the OAUTH2 client Credentials Flow as described in RFC 6749.
+
+Note that this option is NOT supported by all backends.
+
+Properties:
+
+- Config:      client_credentials
+- Env Var:     RCLONE_MAILRU_CLIENT_CREDENTIALS
+- Type:        bool
+- Default:     false
 
 #### --mailru-speedup-file-patterns
 
@@ -224,14 +340,14 @@ Properties:
 - Type:        string
 - Default:     "*.mkv,*.avi,*.mp4,*.mp3,*.zip,*.gz,*.rar,*.pdf"
 - Examples:
-    - ""
-        - Empty list completely disables speedup (put by hash).
-    - "*"
-        - All files will be attempted for speedup.
-    - "*.mkv,*.avi,*.mp4,*.mp3"
-        - Only common audio/video files will be tried for put by hash.
-    - "*.zip,*.gz,*.rar,*.pdf"
-        - Only common archives or PDF books will be tried for speedup.
+  - ""
+    - Empty list completely disables speedup (put by hash).
+  - "*"
+    - All files will be attempted for speedup.
+  - "*.mkv,*.avi,*.mp4,*.mp3"
+    - Only common audio/video files will be tried for put by hash.
+  - "*.zip,*.gz,*.rar,*.pdf"
+    - Only common archives or PDF books will be tried for speedup.
 
 #### --mailru-speedup-max-disk
 
@@ -246,12 +362,12 @@ Properties:
 - Type:        SizeSuffix
 - Default:     3Gi
 - Examples:
-    - "0"
-        - Completely disable speedup (put by hash).
-    - "1G"
-        - Files larger than 1Gb will be uploaded directly.
-    - "3G"
-        - Choose this option if you have less than 3Gb free on local disk.
+  - "0"
+    - Completely disable speedup (put by hash).
+  - "1G"
+    - Files larger than 1Gb will be uploaded directly.
+  - "3G"
+    - Choose this option if you have less than 3Gb free on local disk.
 
 #### --mailru-speedup-max-memory
 
@@ -264,12 +380,12 @@ Properties:
 - Type:        SizeSuffix
 - Default:     32Mi
 - Examples:
-    - "0"
-        - Preliminary hashing will always be done in a temporary disk location.
-    - "32M"
-        - Do not dedicate more than 32Mb RAM for preliminary hashing.
-    - "256M"
-        - You have at most 256Mb RAM free for hash calculations.
+  - "0"
+    - Preliminary hashing will always be done in a temporary disk location.
+  - "32M"
+    - Do not dedicate more than 32Mb RAM for preliminary hashing.
+  - "256M"
+    - You have at most 256Mb RAM free for hash calculations.
 
 #### --mailru-check-hash
 
@@ -282,10 +398,10 @@ Properties:
 - Type:        bool
 - Default:     true
 - Examples:
-    - "true"
-        - Fail with error.
-    - "false"
-        - Ignore and continue.
+  - "true"
+    - Fail with error.
+  - "false"
+    - Ignore and continue.
 
 #### --mailru-user-agent
 
@@ -327,10 +443,21 @@ Properties:
 
 - Config:      encoding
 - Env Var:     RCLONE_MAILRU_ENCODING
-- Type:        MultiEncoder
+- Type:        Encoding
 - Default:     Slash,LtGt,DoubleQuote,Colon,Question,Asterisk,Pipe,BackSlash,Del,Ctl,InvalidUtf8,Dot
 
-{{< rem autogenerated options stop >}}
+#### --mailru-description
+
+Description of the remote.
+
+Properties:
+
+- Config:      description
+- Env Var:     RCLONE_MAILRU_DESCRIPTION
+- Type:        string
+- Required:    false
+
+<!-- autogenerated options stop -->
 
 ## Limitations
 

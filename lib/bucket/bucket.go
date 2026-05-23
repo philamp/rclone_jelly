@@ -29,6 +29,36 @@ func Split(absPath string) (bucket, bucketPath string) {
 	return absPath[:slash], absPath[slash+1:]
 }
 
+// Join path1 and path2
+//
+// Like path.Join but does not clean the path - useful to preserve trailing /.
+//
+// It also does not clean multiple // in the path.
+func Join(path1, path2 string) string {
+	if path1 == "" {
+		return path2
+	}
+	if path2 == "" {
+		return path1
+	}
+	return path1 + "/" + path2
+}
+
+// IsAllSlashes returns true if s is all / characters.
+//
+// It returns false if s is "".
+func IsAllSlashes(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, c := range s {
+		if c != '/' {
+			return false
+		}
+	}
+	return true
+}
+
 // Cache stores whether buckets are available and their IDs
 type Cache struct {
 	mu       sync.Mutex      // mutex to protect created and deleted
@@ -120,7 +150,7 @@ func (c *Cache) Create(bucket string, create CreateFn, exists ExistsFn) (err err
 
 // Remove the bucket with f if it exists
 //
-// If f returns an error we assume the bucket was not removed
+// If f returns an error we assume the bucket was not removed.
 //
 // If the bucket has already been deleted it returns ErrAlreadyDeleted
 func (c *Cache) Remove(bucket string, f func() error) error {

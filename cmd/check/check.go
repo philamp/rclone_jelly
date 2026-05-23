@@ -1,3 +1,4 @@
+// Package check provides the check command.
 package check
 
 import (
@@ -32,20 +33,20 @@ var (
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
 	cmdFlags := commandDefinition.Flags()
-	flags.BoolVarP(cmdFlags, &download, "download", "", download, "Check by downloading rather than with hash")
-	flags.StringVarP(cmdFlags, &checkFileHashType, "checkfile", "C", checkFileHashType, "Treat source:path as a SUM file with hashes of given type")
+	flags.BoolVarP(cmdFlags, &download, "download", "", download, "Check by downloading rather than with hash", "")
+	flags.StringVarP(cmdFlags, &checkFileHashType, "checkfile", "C", checkFileHashType, "Treat source:path as a SUM file with hashes of given type", "")
 	AddFlags(cmdFlags)
 }
 
 // AddFlags adds the check flags to the cmdFlags command
 func AddFlags(cmdFlags *pflag.FlagSet) {
-	flags.BoolVarP(cmdFlags, &oneway, "one-way", "", oneway, "Check one way only, source files must exist on remote")
-	flags.StringVarP(cmdFlags, &combined, "combined", "", combined, "Make a combined report of changes to this file")
-	flags.StringVarP(cmdFlags, &missingOnSrc, "missing-on-src", "", missingOnSrc, "Report all files missing from the source to this file")
-	flags.StringVarP(cmdFlags, &missingOnDst, "missing-on-dst", "", missingOnDst, "Report all files missing from the destination to this file")
-	flags.StringVarP(cmdFlags, &match, "match", "", match, "Report all matching files to this file")
-	flags.StringVarP(cmdFlags, &differ, "differ", "", differ, "Report all non-matching files to this file")
-	flags.StringVarP(cmdFlags, &errFile, "error", "", errFile, "Report all files with errors (hashing or reading) to this file")
+	flags.BoolVarP(cmdFlags, &oneway, "one-way", "", oneway, "Check one way only, source files must exist on remote", "")
+	flags.StringVarP(cmdFlags, &combined, "combined", "", combined, "Make a combined report of changes to this file", "")
+	flags.StringVarP(cmdFlags, &missingOnSrc, "missing-on-src", "", missingOnSrc, "Report all files missing from the source to this file", "")
+	flags.StringVarP(cmdFlags, &missingOnDst, "missing-on-dst", "", missingOnDst, "Report all files missing from the destination to this file", "")
+	flags.StringVarP(cmdFlags, &match, "match", "", match, "Report all matching files to this file", "")
+	flags.StringVarP(cmdFlags, &differ, "differ", "", differ, "Report all non-matching files to this file", "")
+	flags.StringVarP(cmdFlags, &errFile, "error", "", errFile, "Report all files with errors (hashing or reading) to this file", "")
 }
 
 // FlagsHelp describes the flags for the help
@@ -71,7 +72,9 @@ you what happened to it. These are reminiscent of diff files.
 - |+ path| means path was missing on the destination, so only in the source
 - |* path| means path was present in source and destination but different.
 - |! path| means there was an error reading or hashing the source or dest.
-`, "|", "`")
+
+The default number of parallel checks is 8. See the [--checkers](/docs/#checkers-int)
+option for more information.`, "|", "`")
 
 // GetCheckOpt gets the options corresponding to the check flags
 func GetCheckOpt(fsrc, fdst fs.Fs) (opt *operations.CheckOpt, close func(), err error) {
@@ -134,10 +137,13 @@ func GetCheckOpt(fsrc, fdst fs.Fs) (opt *operations.CheckOpt, close func(), err 
 var commandDefinition = &cobra.Command{
 	Use:   "check source:path dest:path",
 	Short: `Checks the files in the source and destination match.`,
-	Long: strings.ReplaceAll(`
-Checks the files in the source and destination match.  It compares
+	Long: strings.ReplaceAll(`Checks the files in the source and destination match.  It compares
 sizes and hashes (MD5 or SHA1) and logs a report of files that don't
 match.  It doesn't alter the source or destination.
+
+For the [crypt](/crypt/) remote there is a dedicated command,
+[cryptcheck](/commands/rclone_cryptcheck/), that are able to check
+the checksums of the encrypted files.
 
 If you supply the |--size-only| flag, it will only compare the sizes not
 the hashes as well.  Use this for a quick check.
@@ -150,6 +156,9 @@ to check all the data.
 If you supply the |--checkfile HASH| flag with a valid hash name,
 the |source:path| must point to a text file in the SUM format.
 `, "|", "`") + FlagsHelp,
+	Annotations: map[string]string{
+		"groups": "Filter,Listing,Check",
+	},
 	RunE: func(command *cobra.Command, args []string) error {
 		cmd.CheckArgs(2, 2, command, args)
 		var (

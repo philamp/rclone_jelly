@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type settings map[string]interface{}
+type settings map[string]any
 
 func deriveFs(ctx context.Context, t *testing.T, f fs.Fs, opts settings) fs.Fs {
 	fsName := strings.Split(f.Name(), "{")[0] // strip off hash
@@ -34,9 +34,9 @@ func deriveFs(ctx context.Context, t *testing.T, f fs.Fs, opts settings) fs.Fs {
 // test that big file uploads do not cause network i/o timeout
 func (f *Fs) testUploadTimeout(t *testing.T) {
 	const (
-		fileSize    = 100000000             // 100 MiB
-		idleTimeout = 40 * time.Millisecond // small because test server is local
-		maxTime     = 10 * time.Second      // prevent test hangup
+		fileSize    = 100000000        // 100 MiB
+		idleTimeout = 1 * time.Second  // small because test server is local
+		maxTime     = 10 * time.Second // prevent test hangup
 	)
 
 	if testing.Short() {
@@ -52,13 +52,21 @@ func (f *Fs) testUploadTimeout(t *testing.T) {
 		ci.Timeout = saveTimeout
 	}()
 	ci.LowLevelRetries = 1
-	ci.Timeout = idleTimeout
 
 	upload := func(concurrency int, shutTimeout time.Duration) (obj fs.Object, err error) {
+		// Use the saved (long) timeout while NewFs dials the FTP control
+		// connection and reads the welcome banner. On slow CI servers this
+		// can take longer than idleTimeout, which would cause a spurious
+		// i/o timeout before the test can run. The connection's idle
+		// deadline is captured at dial time, so the data connection
+		// dialled later inside Put will still get idleTimeout - which is
+		// what the test is actually trying to exercise.
+		ci.Timeout = saveTimeout
 		fixFs := deriveFs(ctx, t, f, settings{
 			"concurrency":  concurrency,
 			"shut_timeout": shutTimeout,
 		})
+		ci.Timeout = fs.Duration(idleTimeout)
 
 		// Make test object
 		fileTime := fstest.Time("2020-03-08T09:30:00.000000000Z")

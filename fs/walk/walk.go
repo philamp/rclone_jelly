@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/dirtree"
 	"github.com/rclone/rclone/fs/filter"
 	"github.com/rclone/rclone/fs/list"
@@ -50,7 +51,7 @@ type Func func(path string, entries fs.DirEntries, err error) error
 // Note that fn will not be called concurrently whereas the directory
 // listing will proceed concurrently.
 //
-// Parent directories are always listed before their children
+// Parent directories are always listed before their children.
 //
 // This is implemented by WalkR if Config.UseListR is true
 // and f supports it and level > 1, or WalkN otherwise.
@@ -64,7 +65,7 @@ type Func func(path string, entries fs.DirEntries, err error) error
 func Walk(ctx context.Context, f fs.Fs, path string, includeAll bool, maxLevel int, fn Func) error {
 	ci := fs.GetConfig(ctx)
 	fi := filter.GetConfig(ctx)
-	ctx = filter.SetUseFilter(ctx, !includeAll) // make filter-aware backends constrain List
+	ctx = filter.SetUseFilter(ctx, f.Features().FilterAware && !includeAll) // make filter-aware backends constrain List
 	if ci.NoTraverse && fi.HaveFilesFrom() {
 		return walkR(ctx, f, path, includeAll, maxLevel, fn, fi.MakeListR(ctx, f.NewObject))
 	}
@@ -158,7 +159,7 @@ func ListR(ctx context.Context, f fs.Fs, path string, includeAll bool, maxLevel 
 		fi.UsesDirectoryFilters() { // ...using any directory filters
 		return listRwalk(ctx, f, path, includeAll, maxLevel, listType, fn)
 	}
-	ctx = filter.SetUseFilter(ctx, !includeAll) // make filter-aware backends constrain List
+	ctx = filter.SetUseFilter(ctx, f.Features().FilterAware && !includeAll) // make filter-aware backends constrain List
 	return listR(ctx, f, path, includeAll, listType, fn, doListR, listType.Dirs() && f.Features().BucketBased)
 }
 
@@ -170,7 +171,7 @@ func listRwalk(ctx context.Context, f fs.Fs, path string, includeAll bool, maxLe
 		// Carry on listing but return the error at the end
 		if err != nil {
 			listErr = err
-			err = fs.CountError(err)
+			err = fs.CountError(ctx, err)
 			fs.Errorf(path, "error listing: %v", err)
 			return nil
 		}
@@ -273,7 +274,7 @@ func (dm *dirMap) sendEntries(fn fs.ListRCallback) (err error) {
 	sort.Strings(dirs)
 	// Now convert to bulkier Dir in batches and send
 	now := time.Now()
-	list := NewListRHelper(fn)
+	list := list.NewHelper(fn)
 	for _, dir := range dirs {
 		err = list.Add(fs.NewDir(dir, now))
 		if err != nil {
@@ -296,6 +297,7 @@ func listR(ctx context.Context, f fs.Fs, path string, includeAll bool, listType 
 	}
 	var mu sync.Mutex
 	err := doListR(ctx, path, func(entries fs.DirEntries) (err error) {
+		accounting.Stats(ctx).Listed(int64(len(entries)))
 		if synthesizeDirs {
 			err = dm.addEntries(entries)
 			if err != nil {
@@ -320,8 +322,6 @@ func listR(ctx context.Context, f fs.Fs, path string, includeAll bool, listType 
 				}
 				if include {
 					filteredEntries = append(filteredEntries, entry)
-				} else {
-					fs.Debugf(entry, "Excluded from sync (and deletion)")
 				}
 			}
 			entries = filteredEntries
@@ -390,10 +390,8 @@ func walk(ctx context.Context, f fs.Fs, path string, includeAll bool, maxLevel i
 			}()
 		})
 	}
-	for i := 0; i < ci.Checkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range ci.Checkers {
+		wg.Go(func() {
 			for {
 				select {
 				case job, ok := <-in:
@@ -417,7 +415,7 @@ func walk(ctx context.Context, f fs.Fs, path string, includeAll bool, maxLevel i
 					// NB once we have passed entries to fn we mustn't touch it again
 					if err != nil && err != ErrorSkipDir {
 						traversing.Done()
-						err = fs.CountError(err)
+						err = fs.CountError(ctx, err)
 						fs.Errorf(job.remote, "error listing: %v", err)
 						closeQuit()
 						// Send error to error channel if space
@@ -442,7 +440,7 @@ func walk(ctx context.Context, f fs.Fs, path string, includeAll bool, maxLevel i
 					return
 				}
 			}
-		}()
+		})
 	}
 	// Start the process
 	traversing.Add(1)
@@ -467,6 +465,7 @@ func walkRDirTree(ctx context.Context, f fs.Fs, startPath string, includeAll boo
 	includeDirectory := fi.IncludeDirectory(ctx, f)
 	var mu sync.Mutex
 	err := listR(ctx, startPath, func(entries fs.DirEntries) error {
+		accounting.Stats(ctx).Listed(int64(len(entries)))
 		mu.Lock()
 		defer mu.Unlock()
 		for _, entry := range entries {
@@ -480,8 +479,6 @@ func walkRDirTree(ctx context.Context, f fs.Fs, startPath string, includeAll boo
 						dirs.Add(x)
 						excluded = false
 					}
-				} else {
-					fs.Debugf(x, "Excluded from sync (and deletion)")
 				}
 				// Make sure we include any parent directories of excluded objects
 				if excluded {
@@ -507,10 +504,11 @@ func walkRDirTree(ctx context.Context, f fs.Fs, startPath string, includeAll boo
 				// Check if we need to prune a directory later.
 				if !includeAll && len(fi.Opt.ExcludeFile) > 0 {
 					basename := path.Base(x.Remote())
-					if basename == fi.Opt.ExcludeFile {
-						excludeDir := parentDir(x.Remote())
-						toPrune[excludeDir] = true
-						fs.Debugf(basename, "Excluded from sync (and deletion) based on exclude file")
+					for _, excludeFile := range fi.Opt.ExcludeFile {
+						if basename == excludeFile {
+							excludeDir := parentDir(x.Remote())
+							toPrune[excludeDir] = true
+						}
 					}
 				}
 			case fs.Directory:
@@ -527,8 +525,6 @@ func walkRDirTree(ctx context.Context, f fs.Fs, startPath string, includeAll boo
 							dirs.AddDir(x)
 						}
 					}
-				} else {
-					fs.Debugf(x, "Excluded from sync (and deletion)")
 				}
 			default:
 				return fmt.Errorf("unknown object type %T", entry)
@@ -645,42 +641,4 @@ func GetAll(ctx context.Context, f fs.Fs, path string, includeAll bool, maxLevel
 		return nil
 	})
 	return
-}
-
-// ListRHelper is used in the implementation of ListR to accumulate DirEntries
-type ListRHelper struct {
-	callback fs.ListRCallback
-	entries  fs.DirEntries
-}
-
-// NewListRHelper should be called from ListR with the callback passed in
-func NewListRHelper(callback fs.ListRCallback) *ListRHelper {
-	return &ListRHelper{
-		callback: callback,
-	}
-}
-
-// send sends the stored entries to the callback if there are >= max
-// entries.
-func (lh *ListRHelper) send(max int) (err error) {
-	if len(lh.entries) >= max {
-		err = lh.callback(lh.entries)
-		lh.entries = lh.entries[:0]
-	}
-	return err
-}
-
-// Add an entry to the stored entries and send them if there are more
-// than a certain amount
-func (lh *ListRHelper) Add(entry fs.DirEntry) error {
-	if entry == nil {
-		return nil
-	}
-	lh.entries = append(lh.entries, entry)
-	return lh.send(100)
-}
-
-// Flush the stored entries (if any) sending them to the callback
-func (lh *ListRHelper) Flush() error {
-	return lh.send(1)
 }

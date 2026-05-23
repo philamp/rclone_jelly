@@ -11,6 +11,8 @@ func TestGetConfig(t *testing.T) {
 	ctx := context.Background()
 
 	// Check nil
+	//lint:ignore SA1012 false positive when running staticcheck, we want to test passing a nil Context and therefore ignore lint suggestion to use context.TODO
+	//nolint:staticcheck // Don't include staticcheck when running golangci-lint to avoid SA1012
 	config := GetConfig(nil)
 	assert.Equal(t, globalConfig, config)
 

@@ -5,7 +5,6 @@ package bilib
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -40,7 +39,7 @@ func FileExists(file string) bool {
 	return !os.IsNotExist(err)
 }
 
-// CopyFileIfExists is like CopyFile but does to fail if source does not exist
+// CopyFileIfExists is like CopyFile but does not fail if source does not exist
 func CopyFileIfExists(srcFile, dstFile string) error {
 	if !FileExists(srcFile) {
 		return nil
@@ -106,7 +105,7 @@ func CopyDir(src string, dst string) (err error) {
 		return
 	}
 
-	entries, err := ioutil.ReadDir(src)
+	entries, err := os.ReadDir(src)
 	if err != nil {
 		return
 	}
@@ -122,7 +121,7 @@ func CopyDir(src string, dst string) (err error) {
 			}
 		} else {
 			// Skip symlinks.
-			if entry.Mode()&os.ModeSymlink != 0 {
+			if entry.Type()&os.ModeSymlink != 0 {
 				continue
 			}
 

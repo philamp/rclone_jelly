@@ -8,13 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
+	"maps"
 	"path"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/ncw/swift/v2"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
@@ -23,12 +25,13 @@ import (
 	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fs/list"
 	"github.com/rclone/rclone/fs/operations"
-	"github.com/rclone/rclone/fs/walk"
 	"github.com/rclone/rclone/lib/atexit"
 	"github.com/rclone/rclone/lib/bucket"
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/pacer"
+	"github.com/rclone/rclone/lib/random"
 	"github.com/rclone/rclone/lib/readers"
 )
 
@@ -38,30 +41,98 @@ const (
 	listChunks                 = 1000                    // chunk size to read directory listings
 	defaultChunkSize           = 5 * fs.Gibi
 	minSleep                   = 10 * time.Millisecond // In case of error, start at 10ms sleep.
+	segmentsContainerSuffix    = "_segments"
+	segmentsDirectory          = ".file-segments"
+	segmentsDirectorySlash     = segmentsDirectory + "/"
 )
 
-// SharedOptions are shared between swift and hubic
+// Auth URLs which imply using fileSegmentsDirectory
+var needFileSegmentsDirectory = regexp.MustCompile(`(?s)\.(ain?\.net|blomp\.com|praetector\.com|signmy\.name|rackfactory\.com)($|/)`)
+
+// SharedOptions are shared between swift and backends which depend on swift
 var SharedOptions = []fs.Option{{
 	Name: "chunk_size",
-	Help: `Above this size files will be chunked into a _segments container.
+	Help: strings.ReplaceAll(`Above this size files will be chunked.
 
-Above this size files will be chunked into a _segments container.  The
-default for this is 5 GiB which is its maximum value.`,
+Above this size files will be chunked into a |`+segmentsContainerSuffix+`| container
+or a |`+segmentsDirectory+`| directory. (See the |use_segments_container| option
+for more info). Default for this is 5 GiB which is its maximum value, which
+means only files above this size will be chunked.
+
+Rclone uploads chunked files as dynamic large objects (DLO).
+`, "|", "`"),
 	Default:  defaultChunkSize,
 	Advanced: true,
 }, {
 	Name: "no_chunk",
-	Help: `Don't chunk files during streaming upload.
+	Help: strings.ReplaceAll(`Don't chunk files during streaming upload.
 
-When doing streaming uploads (e.g. using rcat or mount) setting this
-flag will cause the swift backend to not upload chunked files.
+When doing streaming uploads (e.g. using |rcat| or |mount| with
+|--vfs-cache-mode off|) setting this flag will cause the swift backend
+to not upload chunked files.
 
-This will limit the maximum upload size to 5 GiB. However non chunked
-files are easier to deal with and have an MD5SUM.
+This will limit the maximum streamed upload size to 5 GiB. This is
+useful because non chunked files are easier to deal with and have an
+MD5SUM.
 
-Rclone will still chunk files bigger than chunk_size when doing normal
-copy operations.`,
+Rclone will still chunk files bigger than |chunk_size| when doing
+normal copy operations.`, "|", "`"),
 	Default:  false,
+	Advanced: true,
+}, {
+	Name: "no_large_objects",
+	Help: strings.ReplaceAll(`Disable support for static and dynamic large objects
+
+Swift cannot transparently store files bigger than 5 GiB. There are
+two schemes for chunking large files, static large objects (SLO) or
+dynamic large objects (DLO), and the API does not allow rclone to
+determine whether a file is a static or dynamic large object without
+doing a HEAD on the object. Since these need to be treated
+differently, this means rclone has to issue HEAD requests for objects
+for example when reading checksums.
+
+When |no_large_objects| is set, rclone will assume that there are no
+static or dynamic large objects stored. This means it can stop doing
+the extra HEAD calls which in turn increases performance greatly
+especially when doing a swift to swift transfer with |--checksum| set.
+
+Setting this option implies |no_chunk| and also that no files will be
+uploaded in chunks, so files bigger than 5 GiB will just fail on
+upload.
+
+If you set this option and there **are** static or dynamic large objects,
+then this will give incorrect hashes for them. Downloads will succeed,
+but other operations such as Remove and Copy will fail.
+`, "|", "`"),
+	Default:  false,
+	Advanced: true,
+}, {
+	Name: "use_segments_container",
+	Help: strings.ReplaceAll(`Choose destination for large object segments
+
+Swift cannot transparently store files bigger than 5 GiB and rclone
+will chunk files larger than |chunk_size| (default 5 GiB) in order to
+upload them.
+
+If this value is |true| the chunks will be stored in an additional
+container named the same as the destination container but with
+|`+segmentsContainerSuffix+`| appended. This means that there won't be any duplicated
+data in the original container but having another container may not be
+acceptable.
+
+If this value is |false| the chunks will be stored in a
+|`+segmentsDirectory+`| directory in the root of the container. This
+directory will be omitted when listing the container. Some
+providers (eg Blomp) require this mode as creating additional
+containers isn't allowed. If it is desired to see the |`+segmentsDirectory+`|
+directory in the root then this flag must be set to |true|.
+
+If this value is |unset| (the default), then rclone will choose the value
+to use. It will be |false| unless rclone detects any |auth_url|s that
+it knows need it to be |true|. In this case you'll see a message in
+the DEBUG log.
+`, "|", "`"),
+	Default:  fs.Tristate{},
 	Advanced: true,
 }, {
 	Name:     config.ConfigEncoding,
@@ -75,7 +146,7 @@ copy operations.`,
 func init() {
 	fs.Register(&fs.RegInfo{
 		Name:        "swift",
-		Description: "OpenStack Swift (Rackspace Cloud Files, Memset Memstore, OVH)",
+		Description: "OpenStack Swift (Rackspace Cloud Files, Blomp Cloud Storage, Memset Memstore, OVH)",
 		NewFs:       NewFs,
 		Options: append([]fs.Option{{
 			Name:    "env_auth",
@@ -91,11 +162,13 @@ func init() {
 				},
 			},
 		}, {
-			Name: "user",
-			Help: "User name to log in (OS_USERNAME).",
+			Name:      "user",
+			Help:      "User name to log in (OS_USERNAME).",
+			Sensitive: true,
 		}, {
-			Name: "key",
-			Help: "API key or password (OS_PASSWORD).",
+			Name:      "key",
+			Help:      "API key or password (OS_PASSWORD).",
+			Sensitive: true,
 		}, {
 			Name: "auth",
 			Help: "Authentication URL for server (OS_AUTH_URL).",
@@ -117,22 +190,30 @@ func init() {
 			}, {
 				Value: "https://auth.cloud.ovh.net/v3",
 				Help:  "OVH",
+			}, {
+				Value: "https://authenticate.ain.net",
+				Help:  "Blomp Cloud Storage",
 			}},
 		}, {
-			Name: "user_id",
-			Help: "User ID to log in - optional - most swift systems use user and leave this blank (v3 auth) (OS_USER_ID).",
+			Name:      "user_id",
+			Help:      "User ID to log in - optional - most swift systems use user and leave this blank (v3 auth) (OS_USER_ID).",
+			Sensitive: true,
 		}, {
-			Name: "domain",
-			Help: "User domain - optional (v3 auth) (OS_USER_DOMAIN_NAME)",
+			Name:      "domain",
+			Help:      "User domain - optional (v3 auth) (OS_USER_DOMAIN_NAME)",
+			Sensitive: true,
 		}, {
-			Name: "tenant",
-			Help: "Tenant name - optional for v1 auth, this or tenant_id required otherwise (OS_TENANT_NAME or OS_PROJECT_NAME).",
+			Name:      "tenant",
+			Help:      "Tenant name - optional for v1 auth, this or tenant_id required otherwise (OS_TENANT_NAME or OS_PROJECT_NAME).",
+			Sensitive: true,
 		}, {
-			Name: "tenant_id",
-			Help: "Tenant ID - optional for v1 auth, this or tenant required otherwise (OS_TENANT_ID).",
+			Name:      "tenant_id",
+			Help:      "Tenant ID - optional for v1 auth, this or tenant required otherwise (OS_TENANT_ID).",
+			Sensitive: true,
 		}, {
-			Name: "tenant_domain",
-			Help: "Tenant domain - optional (v3 auth) (OS_PROJECT_DOMAIN_NAME).",
+			Name:      "tenant_domain",
+			Help:      "Tenant domain - optional (v3 auth) (OS_PROJECT_DOMAIN_NAME).",
+			Sensitive: true,
 		}, {
 			Name: "region",
 			Help: "Region name - optional (OS_REGION_NAME).",
@@ -140,17 +221,21 @@ func init() {
 			Name: "storage_url",
 			Help: "Storage URL - optional (OS_STORAGE_URL).",
 		}, {
-			Name: "auth_token",
-			Help: "Auth Token from alternate authentication - optional (OS_AUTH_TOKEN).",
+			Name:      "auth_token",
+			Help:      "Auth Token from alternate authentication - optional (OS_AUTH_TOKEN).",
+			Sensitive: true,
 		}, {
-			Name: "application_credential_id",
-			Help: "Application Credential ID (OS_APPLICATION_CREDENTIAL_ID).",
+			Name:      "application_credential_id",
+			Help:      "Application Credential ID (OS_APPLICATION_CREDENTIAL_ID).",
+			Sensitive: true,
 		}, {
-			Name: "application_credential_name",
-			Help: "Application Credential Name (OS_APPLICATION_CREDENTIAL_NAME).",
+			Name:      "application_credential_name",
+			Help:      "Application Credential Name (OS_APPLICATION_CREDENTIAL_NAME).",
+			Sensitive: true,
 		}, {
-			Name: "application_credential_secret",
-			Help: "Application Credential Secret (OS_APPLICATION_CREDENTIAL_SECRET).",
+			Name:      "application_credential_secret",
+			Help:      "Application Credential Secret (OS_APPLICATION_CREDENTIAL_SECRET).",
+			Sensitive: true,
 		}, {
 			Name:    "auth_version",
 			Help:    "AuthVersion - optional - set to (1,2,3) if your auth URL has no version (ST_AUTH_VERSION).",
@@ -195,6 +280,36 @@ provider.`,
 				Value: "pca",
 				Help:  "OVH Public Cloud Archive",
 			}},
+		}, {
+			Name: "fetch_until_empty_page",
+			Help: `When paginating, always fetch unless we received an empty page.
+
+Consider using this option if rclone listings show fewer objects
+than expected, or if repeated syncs copy unchanged objects.
+
+It is safe to enable this, but rclone may make more API calls than
+necessary.
+
+This is one of a pair of workarounds to handle implementations
+of the Swift API that do not implement pagination as expected.  See
+also "partial_page_fetch_threshold".`,
+			Default:  false,
+			Advanced: true,
+		}, {
+			Name: "partial_page_fetch_threshold",
+			Help: `When paginating, fetch if the current page is within this percentage of the limit.
+
+Consider using this option if rclone listings show fewer objects
+than expected, or if repeated syncs copy unchanged objects.
+
+It is safe to enable this, but rclone may make more API calls than
+necessary.
+
+This is one of a pair of workarounds to handle implementations
+of the Swift API that do not implement pagination as expected.  See
+also "fetch_until_empty_page".`,
+			Default:  0,
+			Advanced: true,
 		}}, SharedOptions...),
 	})
 }
@@ -222,7 +337,11 @@ type Options struct {
 	EndpointType                string               `config:"endpoint_type"`
 	ChunkSize                   fs.SizeSuffix        `config:"chunk_size"`
 	NoChunk                     bool                 `config:"no_chunk"`
+	NoLargeObjects              bool                 `config:"no_large_objects"`
+	UseSegmentsContainer        fs.Tristate          `config:"use_segments_container"`
 	Enc                         encoder.MultiEncoder `config:"encoding"`
+	FetchUntilEmptyPage         bool                 `config:"fetch_until_empty_page"`
+	PartialPageFetchThreshold   int                  `config:"partial_page_fetch_threshold"`
 }
 
 // Fs represents a remote swift server
@@ -268,7 +387,7 @@ func (f *Fs) Root() string {
 // String converts this Fs to a string
 func (f *Fs) String() string {
 	if f.rootContainer == "" {
-		return fmt.Sprintf("Swift root")
+		return "Swift root"
 	}
 	if f.rootDirectory == "" {
 		return fmt.Sprintf("Swift container %s", f.rootContainer)
@@ -300,10 +419,8 @@ func shouldRetry(ctx context.Context, err error) (bool, error) {
 	}
 	// If this is a swift.Error object extract the HTTP error code
 	if swiftError, ok := err.(*swift.Error); ok {
-		for _, e := range retryErrorCodes {
-			if swiftError.StatusCode == e {
-				return true, err
-			}
+		if slices.Contains(retryErrorCodes, swiftError.StatusCode) {
+			return true, err
 		}
 	}
 	// Check for generic failure conditions
@@ -374,9 +491,11 @@ func swiftConnection(ctx context.Context, opt *Options, name string) (*swift.Con
 		ApplicationCredentialName:   opt.ApplicationCredentialName,
 		ApplicationCredentialSecret: opt.ApplicationCredentialSecret,
 		EndpointType:                swift.EndpointType(opt.EndpointType),
-		ConnectTimeout:              10 * ci.ConnectTimeout, // Use the timeouts in the transport
-		Timeout:                     10 * ci.Timeout,        // Use the timeouts in the transport
+		ConnectTimeout:              time.Duration(10 * ci.ConnectTimeout), // Use the timeouts in the transport
+		Timeout:                     time.Duration(10 * ci.Timeout),        // Use the timeouts in the transport
 		Transport:                   fshttp.NewTransport(ctx),
+		FetchUntilEmptyPage:         opt.FetchUntilEmptyPage,
+		PartialPageFetchThreshold:   opt.PartialPageFetchThreshold,
 	}
 	if opt.EnvAuth {
 		err := c.ApplyEnvironment()
@@ -442,6 +561,21 @@ func (f *Fs) setRoot(root string) {
 	f.rootContainer, f.rootDirectory = bucket.Split(f.root)
 }
 
+// Fetch the base container's policy to be used if/when we need to create a
+// segments container to ensure we use the same policy.
+func (f *Fs) fetchStoragePolicy(ctx context.Context, container string) (fs.Fs, error) {
+	err := f.pacer.Call(func() (bool, error) {
+		var rxHeaders swift.Headers
+		_, rxHeaders, err := f.c.Container(ctx, container)
+
+		f.opt.StoragePolicy = rxHeaders["X-Storage-Policy"]
+		fs.Debugf(f, "Auto set StoragePolicy to %s", f.opt.StoragePolicy)
+
+		return shouldRetryHeaders(ctx, rxHeaders, err)
+	})
+	return nil, err
+}
+
 // NewFsWithConnection constructs an Fs from the path, container:path
 // and authenticated connection.
 //
@@ -466,6 +600,12 @@ func NewFsWithConnection(ctx context.Context, opt *Options, name, root string, c
 		BucketBasedRootOK: true,
 		SlowModTime:       true,
 	}).Fill(ctx, f)
+	if !f.opt.UseSegmentsContainer.Valid {
+		f.opt.UseSegmentsContainer.Value = !needFileSegmentsDirectory.MatchString(opt.Auth)
+		f.opt.UseSegmentsContainer.Valid = true
+		fs.Debugf(f, "Auto set use_segments_container to %v", f.opt.UseSegmentsContainer.Value)
+	}
+
 	if f.rootContainer != "" && f.rootDirectory != "" {
 		// Check to see if the object exists - ignoring directory markers
 		var info swift.Object
@@ -521,7 +661,7 @@ func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, info *swift.O
 	// returned as 0 bytes in the listing.  Correct this here by
 	// making sure we read the full metadata for all 0 byte files.
 	// We don't read the metadata for directory marker objects.
-	if info != nil && info.Bytes == 0 && info.ContentType != "application/directory" {
+	if info != nil && info.Bytes == 0 && info.ContentType != "application/directory" && !o.fs.opt.NoLargeObjects {
 		err := o.readMetaData(ctx) // reads info and headers, returning an error
 		if err == fs.ErrorObjectNotFound {
 			// We have a dangling large object here so just return the original metadata
@@ -577,7 +717,7 @@ func (f *Fs) listContainerRoot(ctx context.Context, container, directory, prefix
 	if !recurse {
 		opts.Delimiter = '/'
 	}
-	return f.c.ObjectsWalk(ctx, container, &opts, func(ctx context.Context, opts *swift.ObjectsOpts) (interface{}, error) {
+	return f.c.ObjectsWalk(ctx, container, &opts, func(ctx context.Context, opts *swift.ObjectsOpts) (any, error) {
 		var objects []swift.Object
 		var err error
 		err = f.pacer.Call(func() (bool, error) {
@@ -587,6 +727,10 @@ func (f *Fs) listContainerRoot(ctx context.Context, container, directory, prefix
 		if err == nil {
 			for i := range objects {
 				object := &objects[i]
+				if !includeDirMarkers && !f.opt.UseSegmentsContainer.Value && (object.Name == segmentsDirectory || strings.HasPrefix(object.Name, segmentsDirectorySlash)) {
+					// Don't show segments in listing unless showing directory markers
+					continue
+				}
 				isDirectory := false
 				if !recurse {
 					isDirectory = strings.HasSuffix(object.Name, "/")
@@ -645,21 +789,20 @@ func (f *Fs) list(ctx context.Context, container, directory, prefix string, addC
 }
 
 // listDir lists a single directory
-func (f *Fs) listDir(ctx context.Context, container, directory, prefix string, addContainer bool) (entries fs.DirEntries, err error) {
+func (f *Fs) listDir(ctx context.Context, container, directory, prefix string, addContainer bool, callback func(fs.DirEntry) error) (err error) {
 	if container == "" {
-		return nil, fs.ErrorListBucketRequired
+		return fs.ErrorListBucketRequired
 	}
 	// List the objects
 	err = f.list(ctx, container, directory, prefix, addContainer, false, false, func(entry fs.DirEntry) error {
-		entries = append(entries, entry)
-		return nil
+		return callback(entry)
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	// container must be present if listing succeeded
 	f.cache.MarkOK(container)
-	return entries, nil
+	return nil
 }
 
 // listContainers lists the containers
@@ -690,14 +833,46 @@ func (f *Fs) listContainers(ctx context.Context) (entries fs.DirEntries, err err
 // This should return ErrDirNotFound if the directory isn't
 // found.
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
+	return list.WithListP(ctx, dir, f)
+}
+
+// ListP lists the objects and directories of the Fs starting
+// from dir non recursively into out.
+//
+// dir should be "" to start from the root, and should not
+// have trailing slashes.
+//
+// This should return ErrDirNotFound if the directory isn't
+// found.
+//
+// It should call callback for each tranche of entries read.
+// These need not be returned in any particular order.  If
+// callback returns an error then the listing will stop
+// immediately.
+func (f *Fs) ListP(ctx context.Context, dir string, callback fs.ListRCallback) error {
+	list := list.NewHelper(callback)
 	container, directory := f.split(dir)
 	if container == "" {
 		if directory != "" {
-			return nil, fs.ErrorListBucketRequired
+			return fs.ErrorListBucketRequired
 		}
-		return f.listContainers(ctx)
+		entries, err := f.listContainers(ctx)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			err = list.Add(entry)
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		err := f.listDir(ctx, container, directory, f.rootDirectory, f.rootContainer == "", list.Add)
+		if err != nil {
+			return err
+		}
 	}
-	return f.listDir(ctx, container, directory, f.rootDirectory, f.rootContainer == "")
+	return list.Flush()
 }
 
 // ListR lists the objects and directories of the Fs starting
@@ -718,7 +893,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // of listing recursively than doing a directory traversal.
 func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (err error) {
 	container, directory := f.split(dir)
-	list := walk.NewListRHelper(callback)
+	list := list.NewHelper(callback)
 	listR := func(container, directory, prefix string, addContainer bool) error {
 		return f.list(ctx, container, directory, prefix, addContainer, true, false, func(entry fs.DirEntry) error {
 			return list.Add(entry)
@@ -755,7 +930,7 @@ func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (
 
 // About gets quota information
 func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
-	var total, objects int64
+	var used, objects, total int64
 	if f.rootContainer != "" {
 		var container swift.Container
 		err = f.pacer.Call(func() (bool, error) {
@@ -765,8 +940,23 @@ func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
 		if err != nil {
 			return nil, fmt.Errorf("container info failed: %w", err)
 		}
-		total = container.Bytes
+		used = container.Bytes
 		objects = container.Count
+		total = container.QuotaBytes
+
+		if f.opt.UseSegmentsContainer.Value {
+			err = f.pacer.Call(func() (bool, error) {
+				segmentsContainer := f.rootContainer + segmentsContainerSuffix
+				container, _, err = f.c.Container(ctx, segmentsContainer)
+				return shouldRetry(ctx, err)
+			})
+			if err != nil && err != swift.ContainerNotFound {
+				return nil, fmt.Errorf("container info failed: %w", err)
+			}
+			if err == nil {
+				used += container.Bytes
+			}
+		}
 	} else {
 		var containers []swift.Container
 		err = f.pacer.Call(func() (bool, error) {
@@ -777,20 +967,25 @@ func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
 			return nil, fmt.Errorf("container listing failed: %w", err)
 		}
 		for _, c := range containers {
-			total += c.Bytes
+			used += c.Bytes
 			objects += c.Count
+			total += c.QuotaBytes
 		}
 	}
 	usage = &fs.Usage{
-		Used:    fs.NewUsageValue(total),   // bytes in use
+		Used:    fs.NewUsageValue(used),    // bytes in use
 		Objects: fs.NewUsageValue(objects), // objects in use
+	}
+	if total > 0 {
+		usage.Total = fs.NewUsageValue(total)
+		usage.Free = fs.NewUsageValue(total - used)
 	}
 	return usage, nil
 }
 
 // Put the object into the container
 //
-// Copy the reader in to the new object which is returned
+// Copy the reader in to the new object which is returned.
 //
 // The new object may have been created if an error is returned
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
@@ -902,9 +1097,9 @@ func (f *Fs) Purge(ctx context.Context, dir string) error {
 
 // Copy src to this remote using server-side copy operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -925,8 +1120,8 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		return nil, err
 	}
 	if isLargeObject {
-		/*handle large object*/
-		err = copyLargeObject(ctx, f, srcObj, dstContainer, dstPath)
+		// handle large object
+		err = f.copyLargeObject(ctx, srcObj, dstContainer, dstPath)
 	} else {
 		srcContainer, srcPath := srcObj.split()
 		err = f.pacer.Call(func() (bool, error) {
@@ -941,102 +1136,131 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	return f.NewObject(ctx, remote)
 }
 
-func copyLargeObject(ctx context.Context, f *Fs, src *Object, dstContainer string, dstPath string) error {
-	segmentsContainer := dstContainer + "_segments"
-	err := f.makeContainer(ctx, segmentsContainer)
+// Represents a segmented upload or copy
+type segmentedUpload struct {
+	f            *Fs        // parent
+	dstContainer string     // container for the file to live once uploaded
+	container    string     // container for the segments
+	dstPath      string     // path for the object to live once uploaded
+	path         string     // unique path for the segments
+	mu           sync.Mutex // protects the variables below
+	segments     []string   // segments successfully uploaded
+}
+
+// Create a new segmented upload using the correct container and path
+func (f *Fs) newSegmentedUpload(ctx context.Context, dstContainer string, dstPath string) (su *segmentedUpload, err error) {
+	randomString, err := random.Password(128)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("failed to create random string for upload: %w", err)
 	}
-	segments, err := src.getSegmentsLargeObject(ctx)
-	if err != nil {
-		return err
+	uniqueString := time.Now().Format("2006-01-02-150405") + "-" + randomString
+	su = &segmentedUpload{
+		f:            f,
+		dstPath:      dstPath,
+		path:         dstPath + "/" + uniqueString,
+		dstContainer: dstContainer,
+		container:    dstContainer,
 	}
-	if len(segments) == 0 {
-		return errors.New("could not copy object, list segments are empty")
-	}
-	nanoSeconds := time.Now().Nanosecond()
-	prefixSegment := fmt.Sprintf("%v/%v/%s", nanoSeconds, src.size, strings.ReplaceAll(uuid.New().String(), "-", ""))
-	copiedSegmentsLen := 10
-	for _, value := range segments {
-		if len(value) <= 0 {
-			continue
-		}
-		fragment := value[0]
-		if len(fragment) <= 0 {
-			continue
-		}
-		copiedSegmentsLen = len(value)
-		firstIndex := strings.Index(fragment, "/")
-		if firstIndex < 0 {
-			firstIndex = 0
-		} else {
-			firstIndex = firstIndex + 1
-		}
-		lastIndex := strings.LastIndex(fragment, "/")
-		if lastIndex < 0 {
-			lastIndex = len(fragment)
-		} else {
-			lastIndex = lastIndex - 1
-		}
-		prefixSegment = fragment[firstIndex:lastIndex]
-		break
-	}
-	copiedSegments := make([]string, copiedSegmentsLen)
-	defer handleCopyFail(ctx, f, segmentsContainer, copiedSegments, err)
-	for c, ss := range segments {
-		if len(ss) <= 0 {
-			continue
-		}
-		for _, s := range ss {
-			lastIndex := strings.LastIndex(s, "/")
-			if lastIndex <= 0 {
-				lastIndex = 0
-			} else {
-				lastIndex = lastIndex + 1
-			}
-			segmentName := dstPath + "/" + prefixSegment + "/" + s[lastIndex:]
-			err = f.pacer.Call(func() (bool, error) {
-				var rxHeaders swift.Headers
-				rxHeaders, err = f.c.ObjectCopy(ctx, c, s, segmentsContainer, segmentName, nil)
-				copiedSegments = append(copiedSegments, segmentName)
-				return shouldRetryHeaders(ctx, rxHeaders, err)
-			})
+	if f.opt.UseSegmentsContainer.Value {
+		if f.opt.StoragePolicy == "" {
+			_, err = f.fetchStoragePolicy(ctx, dstContainer)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
+
+		su.container += segmentsContainerSuffix
+		err = f.makeContainer(ctx, su.container)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		su.path = segmentsDirectorySlash + su.path
 	}
-	m := swift.Metadata{}
-	headers := m.ObjectHeaders()
-	headers["X-Object-Manifest"] = urlEncode(fmt.Sprintf("%s/%s/%s", segmentsContainer, dstPath, prefixSegment))
-	headers["Content-Length"] = "0"
+	return su, nil
+}
+
+// Return the path of the i-th segment
+func (su *segmentedUpload) segmentPath(i int) string {
+	return fmt.Sprintf("%s/%08d", su.path, i)
+}
+
+// Mark segment as successfully uploaded
+func (su *segmentedUpload) uploaded(segment string) {
+	su.mu.Lock()
+	defer su.mu.Unlock()
+	su.segments = append(su.segments, segment)
+}
+
+// Return the full path including the container
+func (su *segmentedUpload) fullPath() string {
+	return fmt.Sprintf("%s/%s", su.container, su.path)
+}
+
+// Remove segments when upload/copy process fails
+func (su *segmentedUpload) onFail() {
+	f := su.f
+	if f.opt.LeavePartsOnError {
+		return
+	}
+	ctx := context.Background()
+	fs.Debugf(f, "Segment operation failed: bulk deleting failed segments")
+	if len(su.container) == 0 {
+		fs.Debugf(f, "Invalid segments container")
+		return
+	}
+	if len(su.segments) == 0 {
+		fs.Debugf(f, "No segments to delete")
+		return
+	}
+	_, err := f.c.BulkDelete(ctx, su.container, su.segments)
+	if err != nil {
+		fs.Errorf(f, "Failed to bulk delete failed segments: %v", err)
+	}
+}
+
+// upload the manifest when upload is done
+func (su *segmentedUpload) uploadManifest(ctx context.Context, contentType string, headers swift.Headers) (err error) {
+	delete(headers, "Etag") // remove Etag if present as it is wrong for the manifest
+	headers["X-Object-Manifest"] = urlEncode(su.fullPath())
+	headers["Content-Length"] = "0" // set Content-Length as we know it
 	emptyReader := bytes.NewReader(nil)
-	err = f.pacer.Call(func() (bool, error) {
+	fs.Debugf(su.f, "uploading manifest %q to %q", su.dstPath, su.dstContainer)
+	err = su.f.pacer.Call(func() (bool, error) {
 		var rxHeaders swift.Headers
-		rxHeaders, err = f.c.ObjectPut(ctx, dstContainer, dstPath, emptyReader, true, "", src.contentType, headers)
+		rxHeaders, err = su.f.c.ObjectPut(ctx, su.dstContainer, su.dstPath, emptyReader, true, "", contentType, headers)
 		return shouldRetryHeaders(ctx, rxHeaders, err)
 	})
 	return err
 }
 
-//remove copied segments when copy process failed
-func handleCopyFail(ctx context.Context, f *Fs, segmentsContainer string, segments []string, err error) {
-	fs.Debugf(f, "handle copy segment fail")
-	if err == nil {
-		return
+// Copy a large object src into (dstContainer, dstPath)
+func (f *Fs) copyLargeObject(ctx context.Context, src *Object, dstContainer string, dstPath string) (err error) {
+	su, err := f.newSegmentedUpload(ctx, dstContainer, dstPath)
+	if err != nil {
+		return err
 	}
-	if len(segmentsContainer) == 0 {
-		fs.Debugf(f, "invalid segments container")
-		return
+	srcSegmentsContainer, srcSegments, err := src.getSegmentsLargeObject(ctx)
+	if err != nil {
+		return fmt.Errorf("copy large object: %w", err)
 	}
-	if len(segments) == 0 {
-		fs.Debugf(f, "segments is empty")
-		return
+	if len(srcSegments) == 0 {
+		return errors.New("could not copy object, list segments are empty")
 	}
-	fs.Debugf(f, "action delete segments what copied")
-	for _, v := range segments {
-		_ = f.c.ObjectDelete(ctx, segmentsContainer, v)
+	defer atexit.OnError(&err, su.onFail)()
+	for i, srcSegment := range srcSegments {
+		dstSegment := su.segmentPath(i)
+		err = f.pacer.Call(func() (bool, error) {
+			var rxHeaders swift.Headers
+			rxHeaders, err = f.c.ObjectCopy(ctx, srcSegmentsContainer, srcSegment, su.container, dstSegment, nil)
+			return shouldRetryHeaders(ctx, rxHeaders, err)
+		})
+		if err != nil {
+			return err
+		}
+		su.uploaded(dstSegment)
 	}
+	return su.uploadManifest(ctx, src.contentType, src.headers)
 }
 
 // Hashes returns the supported hash sets.
@@ -1100,15 +1324,24 @@ func (o *Object) hasHeader(ctx context.Context, header string) (bool, error) {
 
 // isDynamicLargeObject checks for X-Object-Manifest header
 func (o *Object) isDynamicLargeObject(ctx context.Context) (bool, error) {
+	if o.fs.opt.NoLargeObjects {
+		return false, nil
+	}
 	return o.hasHeader(ctx, "X-Object-Manifest")
 }
 
 // isStaticLargeObjectFile checks for the X-Static-Large-Object header
 func (o *Object) isStaticLargeObject(ctx context.Context) (bool, error) {
+	if o.fs.opt.NoLargeObjects {
+		return false, nil
+	}
 	return o.hasHeader(ctx, "X-Static-Large-Object")
 }
 
 func (o *Object) isLargeObject(ctx context.Context) (result bool, err error) {
+	if o.fs.opt.NoLargeObjects {
+		return false, nil
+	}
 	result, err = o.hasHeader(ctx, "X-Static-Large-Object")
 	if result {
 		return
@@ -1140,10 +1373,11 @@ func (o *Object) Size() int64 {
 // decodeMetaData sets the metadata in the object from a swift.Object
 //
 // Sets
-//  o.lastModified
-//  o.size
-//  o.md5
-//  o.contentType
+//
+//	o.lastModified
+//	o.size
+//	o.md5
+//	o.contentType
 func (o *Object) decodeMetaData(info *swift.Object) (err error) {
 	o.lastModified = info.LastModified
 	o.size = info.Bytes
@@ -1184,7 +1418,6 @@ func (o *Object) readMetaData(ctx context.Context) (err error) {
 
 // ModTime returns the modification time of the object
 //
-//
 // It attempts to read the objects mtime and if that isn't present the
 // LastModified returned in the http headers
 func (o *Object) ModTime(ctx context.Context) time.Time {
@@ -1213,9 +1446,7 @@ func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
 	meta := o.headers.ObjectMetadata()
 	meta.SetModTime(modTime)
 	newHeaders := meta.ObjectHeaders()
-	for k, v := range newHeaders {
-		o.headers[k] = v
-	}
+	maps.Copy(o.headers, newHeaders)
 	// Include any other metadata from request
 	for k, v := range o.headers {
 		if strings.HasPrefix(k, "X-Object-") {
@@ -1251,62 +1482,32 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	return
 }
 
-// min returns the smallest of x, y
-func min(x, y int64) int64 {
-	if x < y {
-		return x
-	}
-	return y
-}
-
-func (o *Object) getSegmentsLargeObject(ctx context.Context) (map[string][]string, error) {
+// Get the segments for a large object
+//
+// It returns the names of the segments and the container that they live in
+func (o *Object) getSegmentsLargeObject(ctx context.Context) (container string, segments []string, err error) {
 	container, objectName := o.split()
-	segmentContainer, segmentObjects, err := o.fs.c.LargeObjectGetSegments(ctx, container, objectName)
+	container, segmentObjects, err := o.fs.c.LargeObjectGetSegments(ctx, container, objectName)
 	if err != nil {
-		fs.Debugf(o, "Failed to get list segments of object: %v", err)
-		return nil, err
+		return container, segments, fmt.Errorf("failed to get list segments of object: %w", err)
 	}
-	var containerSegments = make(map[string][]string)
-	for _, segment := range segmentObjects {
-		if _, ok := containerSegments[segmentContainer]; !ok {
-			containerSegments[segmentContainer] = make([]string, 0, len(segmentObjects))
-		}
-		segments, _ := containerSegments[segmentContainer]
-		segments = append(segments, segment.Name)
-		containerSegments[segmentContainer] = segments
+	segments = make([]string, len(segmentObjects))
+	for i := range segmentObjects {
+		segments[i] = segmentObjects[i].Name
 	}
-	return containerSegments, nil
+	return container, segments, nil
 }
 
-func (o *Object) removeSegmentsLargeObject(ctx context.Context, containerSegments map[string][]string) error {
-	if containerSegments == nil || len(containerSegments) <= 0 {
+// Remove the segments for a large object
+func (o *Object) removeSegmentsLargeObject(ctx context.Context, container string, segments []string) error {
+	if len(segments) == 0 {
 		return nil
 	}
-	for container, segments := range containerSegments {
-		_, err := o.fs.c.BulkDelete(ctx, container, segments)
-		if err != nil {
-			fs.Debugf(o, "Failed to delete bulk segments %v", err)
-			return err
-		}
+	_, err := o.fs.c.BulkDelete(ctx, container, segments)
+	if err != nil {
+		return fmt.Errorf("failed to delete bulk segments: %w", err)
 	}
 	return nil
-}
-
-func (o *Object) getSegmentsDlo(ctx context.Context) (segmentsContainer string, prefix string, err error) {
-	if err = o.readMetaData(ctx); err != nil {
-		return
-	}
-	dirManifest := o.headers["X-Object-Manifest"]
-	dirManifest, err = url.PathUnescape(dirManifest)
-	if err != nil {
-		return
-	}
-	delimiter := strings.Index(dirManifest, "/")
-	if len(dirManifest) == 0 || delimiter < 0 {
-		err = errors.New("Missing or wrong structure of manifest of Dynamic large object")
-		return
-	}
-	return dirManifest[:delimiter], dirManifest[delimiter+1:], nil
 }
 
 // urlEncode encodes a string so that it is a valid URL
@@ -1315,7 +1516,7 @@ func (o *Object) getSegmentsDlo(ctx context.Context) (segmentsContainer string, 
 // encoded but we need '&' encoded.
 func urlEncode(str string) string {
 	var buf bytes.Buffer
-	for i := 0; i < len(str); i++ {
+	for i := range len(str) {
 		c := str[i]
 		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '/' || c == '.' || c == '_' || c == '-' {
 			_ = buf.WriteByte(c)
@@ -1327,55 +1528,25 @@ func urlEncode(str string) string {
 }
 
 // updateChunks updates the existing object using chunks to a separate
-// container.  It returns a string which prefixes current segments.
-func (o *Object) updateChunks(ctx context.Context, in0 io.Reader, headers swift.Headers, size int64, contentType string) (string, error) {
+// container.
+func (o *Object) updateChunks(ctx context.Context, in0 io.Reader, headers swift.Headers, size int64, contentType string) (err error) {
 	container, containerPath := o.split()
-	segmentsContainer := container + "_segments"
-	// Create the segmentsContainer if it doesn't exist
-	var err error
-	err = o.fs.pacer.Call(func() (bool, error) {
-		var rxHeaders swift.Headers
-		_, rxHeaders, err = o.fs.c.Container(ctx, segmentsContainer)
-		return shouldRetryHeaders(ctx, rxHeaders, err)
-	})
-	if err == swift.ContainerNotFound {
-		headers := swift.Headers{}
-		if o.fs.opt.StoragePolicy != "" {
-			headers["X-Storage-Policy"] = o.fs.opt.StoragePolicy
-		}
-		err = o.fs.pacer.Call(func() (bool, error) {
-			err = o.fs.c.ContainerCreate(ctx, segmentsContainer, headers)
-			return shouldRetry(ctx, err)
-		})
-	}
+	su, err := o.fs.newSegmentedUpload(ctx, container, containerPath)
 	if err != nil {
-		return "", err
+		return err
 	}
 	// Upload the chunks
 	left := size
 	i := 0
-	uniquePrefix := fmt.Sprintf("%s/%d", swift.TimeToFloatString(time.Now()), size)
-	segmentsPath := path.Join(containerPath, uniquePrefix)
 	in := bufio.NewReader(in0)
-	segmentInfos := make([]string, 0, (size/int64(o.fs.opt.ChunkSize))+1)
-	defer atexit.OnError(&err, func() {
-		if o.fs.opt.LeavePartsOnError {
-			return
-		}
-		fs.Debugf(o, "Delete segments when err raise %v", err)
-		if segmentInfos == nil || len(segmentInfos) == 0 {
-			return
-		}
-		_ctx := context.Background()
-		deleteChunks(_ctx, o, segmentsContainer, segmentInfos)
-	})()
+	defer atexit.OnError(&err, su.onFail)()
 	for {
 		// can we read at least one byte?
 		if _, err = in.Peek(1); err != nil {
 			if left > 0 {
-				return "", err // read less than expected
+				return err // read less than expected
 			}
-			fs.Debugf(o, "Uploading segments into %q seems done (%v)", segmentsContainer, err)
+			fs.Debugf(o, "Uploading segments into %q seems done (%v)", su.container, err)
 			break
 		}
 		n := int64(o.fs.opt.ChunkSize)
@@ -1385,49 +1556,20 @@ func (o *Object) updateChunks(ctx context.Context, in0 io.Reader, headers swift.
 			left -= n
 		}
 		segmentReader := io.LimitReader(in, n)
-		segmentPath := fmt.Sprintf("%s/%08d", segmentsPath, i)
-		fs.Debugf(o, "Uploading segment file %q into %q", segmentPath, segmentsContainer)
+		segmentPath := su.segmentPath(i)
+		fs.Debugf(o, "Uploading segment file %q into %q", segmentPath, su.container)
 		err = o.fs.pacer.CallNoRetry(func() (bool, error) {
 			var rxHeaders swift.Headers
-			rxHeaders, err = o.fs.c.ObjectPut(ctx, segmentsContainer, segmentPath, segmentReader, true, "", "", headers)
-			if err == nil {
-				segmentInfos = append(segmentInfos, segmentPath)
-			}
+			rxHeaders, err = o.fs.c.ObjectPut(ctx, su.container, segmentPath, segmentReader, true, "", "", headers)
 			return shouldRetryHeaders(ctx, rxHeaders, err)
 		})
 		if err != nil {
-			return "", err
+			return err
 		}
+		su.uploaded(segmentPath)
 		i++
 	}
-	// Upload the manifest
-	headers["X-Object-Manifest"] = urlEncode(fmt.Sprintf("%s/%s", segmentsContainer, segmentsPath))
-	headers["Content-Length"] = "0" // set Content-Length as we know it
-	emptyReader := bytes.NewReader(nil)
-	err = o.fs.pacer.Call(func() (bool, error) {
-		var rxHeaders swift.Headers
-		rxHeaders, err = o.fs.c.ObjectPut(ctx, container, containerPath, emptyReader, true, "", contentType, headers)
-		return shouldRetryHeaders(ctx, rxHeaders, err)
-	})
-
-	if err == nil {
-		//reset data
-		segmentInfos = nil
-	}
-	return uniquePrefix + "/", err
-}
-
-func deleteChunks(ctx context.Context, o *Object, segmentsContainer string, segmentInfos []string) {
-	if segmentInfos == nil || len(segmentInfos) == 0 {
-		return
-	}
-	for _, v := range segmentInfos {
-		fs.Debugf(o, "Delete segment file %q on %q", v, segmentsContainer)
-		e := o.fs.c.ObjectDelete(ctx, segmentsContainer, v)
-		if e != nil {
-			fs.Errorf(o, "Error occurred in delete segment file %q on %q, error: %q", v, segmentsContainer, e)
-		}
-	}
+	return su.uploadManifest(ctx, contentType, headers)
 }
 
 // Update the object with the contents of the io.Reader, modTime and size
@@ -1451,10 +1593,11 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		return err
 	}
 
-	//capture segments before upload
-	var segmentsContainer map[string][]string
+	// Capture segments before upload
+	var segmentsContainer string
+	var segments []string
 	if isLargeObject {
-		segmentsContainer, _ = o.getSegmentsLargeObject(ctx)
+		segmentsContainer, segments, _ = o.getSegmentsLargeObject(ctx)
 	}
 
 	// Set the mtime
@@ -1464,8 +1607,8 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	headers := m.ObjectHeaders()
 	fs.OpenOptionAddHeaders(options, headers)
 
-	if size > int64(o.fs.opt.ChunkSize) || (size == -1 && !o.fs.opt.NoChunk) {
-		_, err = o.updateChunks(ctx, in, headers, size, contentType)
+	if (size > int64(o.fs.opt.ChunkSize) || (size == -1 && !o.fs.opt.NoChunk)) && !o.fs.opt.NoLargeObjects {
+		err = o.updateChunks(ctx, in, headers, size, contentType)
 		if err != nil {
 			return err
 		}
@@ -1499,12 +1642,14 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 			o.size = int64(inCount.BytesRead())
 		}
 	}
-	isInContainerVersioning, _ := o.isInContainerVersioning(ctx, container)
 	// If file was a large object and the container is not enable versioning then remove old/all segments
-	if isLargeObject && len(segmentsContainer) > 0 && !isInContainerVersioning {
-		err := o.removeSegmentsLargeObject(ctx, segmentsContainer)
-		if err != nil {
-			fs.Logf(o, "Failed to remove old segments - carrying on with upload: %v", err)
+	if isLargeObject && len(segmentsContainer) > 0 {
+		isInContainerVersioning, _ := o.isInContainerVersioning(ctx, container)
+		if !isInContainerVersioning {
+			err := o.removeSegmentsLargeObject(ctx, segmentsContainer, segments)
+			if err != nil {
+				fs.Logf(o, "Failed to remove old segments - carrying on with upload: %v", err)
+			}
 		}
 	}
 
@@ -1529,10 +1674,11 @@ func (o *Object) Remove(ctx context.Context) (err error) {
 			return err
 		}
 	}
-	//capture segments object if this object is large object
-	var containerSegments map[string][]string
+	// Capture segments object if this object is large object
+	var segmentsContainer string
+	var segments []string
 	if isLargeObject {
-		containerSegments, err = o.getSegmentsLargeObject(ctx)
+		segmentsContainer, segments, err = o.getSegmentsLargeObject(ctx)
 		if err != nil {
 			return err
 		}
@@ -1540,6 +1686,10 @@ func (o *Object) Remove(ctx context.Context) (err error) {
 	// Remove file/manifest first
 	err = o.fs.pacer.Call(func() (bool, error) {
 		err = o.fs.c.ObjectDelete(ctx, container, containerPath)
+		if err == swift.ObjectNotFound {
+			fs.Errorf(o, "Dangling object - ignoring: %v", err)
+			err = nil
+		}
 		return shouldRetry(ctx, err)
 	})
 	if err != nil {
@@ -1551,7 +1701,7 @@ func (o *Object) Remove(ctx context.Context) (err error) {
 	}
 
 	if isLargeObject {
-		return o.removeSegmentsLargeObject(ctx, containerSegments)
+		return o.removeSegmentsLargeObject(ctx, segmentsContainer, segments)
 	}
 	return nil
 }
@@ -1568,6 +1718,7 @@ var (
 	_ fs.PutStreamer = &Fs{}
 	_ fs.Copier      = &Fs{}
 	_ fs.ListRer     = &Fs{}
+	_ fs.ListPer     = &Fs{}
 	_ fs.Object      = &Object{}
 	_ fs.MimeTyper   = &Object{}
 )

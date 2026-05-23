@@ -1,3 +1,4 @@
+// Package putio provides an interface to the put.io storage system.
 package putio
 
 import (
@@ -12,7 +13,6 @@ import (
 	"github.com/rclone/rclone/lib/dircache"
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/oauthutil"
-	"golang.org/x/oauth2"
 )
 
 /*
@@ -40,12 +40,10 @@ const (
 
 var (
 	// Description of how to auth for this app
-	putioConfig = &oauth2.Config{
-		Scopes: []string{},
-		Endpoint: oauth2.Endpoint{
-			AuthURL:  "https://api.put.io/v2/oauth2/authenticate",
-			TokenURL: "https://api.put.io/v2/oauth2/access_token",
-		},
+	putioConfig = &oauthutil.Config{
+		Scopes:       []string{},
+		AuthURL:      "https://api.put.io/v2/oauth2/authenticate",
+		TokenURL:     "https://api.put.io/v2/oauth2/access_token",
 		ClientID:     rcloneClientID,
 		ClientSecret: obscure.MustReveal(rcloneObscuredClientSecret),
 		RedirectURL:  oauthutil.RedirectLocalhostURL,
@@ -66,7 +64,7 @@ func init() {
 				NoOffline:    true,
 			})
 		},
-		Options: []fs.Option{{
+		Options: append(oauthutil.SharedOptions, []fs.Option{{
 			Name:     config.ConfigEncoding,
 			Help:     config.ConfigEncodingHelp,
 			Advanced: true,
@@ -76,7 +74,7 @@ func init() {
 			Default: (encoder.Display |
 				encoder.EncodeBackSlash |
 				encoder.EncodeInvalidUtf8),
-		}},
+		}}...),
 	})
 }
 

@@ -7,41 +7,74 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
-	"strconv"
+	"runtime"
+	"strings"
 	gosync "sync"
+	"time"
 
 	"github.com/rclone/rclone/cmd/bisync/bilib"
 	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/filter"
+	"github.com/rclone/rclone/fs/accounting"
+	"github.com/rclone/rclone/fs/log"
 	"github.com/rclone/rclone/fs/operations"
-	"github.com/rclone/rclone/fs/sync"
 	"github.com/rclone/rclone/lib/atexit"
+	"github.com/rclone/rclone/lib/terminal"
 )
 
-// ErrBisyncAborted signals that bisync is aborted and forces exit code 2
+// ErrBisyncAborted signals that bisync is aborted and forces non-zero exit code
 var ErrBisyncAborted = errors.New("bisync aborted")
 
 // bisyncRun keeps bisync runtime state
 type bisyncRun struct {
-	fs1      fs.Fs
-	fs2      fs.Fs
-	abort    bool
-	critical bool
-	basePath string
-	workDir  string
-	opt      *Options
+	fs1                fs.Fs
+	fs2                fs.Fs
+	abort              bool
+	critical           bool
+	retryable          bool
+	basePath           string
+	workDir            string
+	listing1           string
+	listing2           string
+	newListing1        string
+	newListing2        string
+	aliases            bilib.AliasMap
+	opt                *Options
+	octx               context.Context
+	fctx               context.Context
+	InGracefulShutdown bool
+	CleanupCompleted   bool
+	SyncCI             *fs.ConfigInfo
+	CancelSync         context.CancelFunc
+	DebugName          string
+	lockFile           string
+	renames            renames
+	resyncIs1to2       bool
+	march              bisyncMarch
+	check              bisyncCheck
+	queueOpt           bisyncQueueOpt
+	downloadHashOpt    downloadHashOpt
+	lockFileOpt        lockFileOpt
+}
+
+type queues struct {
+	copy1to2      bilib.Names
+	copy2to1      bilib.Names
+	renameSkipped bilib.Names // not renamed because it was equal
+	skippedDirs1  *fileList
+	skippedDirs2  *fileList
+	deletedonboth bilib.Names
 }
 
 // Bisync handles lock file, performs bisync run and checks exit status
 func Bisync(ctx context.Context, fs1, fs2 fs.Fs, optArg *Options) (err error) {
 	opt := *optArg // ensure that input is never changed
 	b := &bisyncRun{
-		fs1: fs1,
-		fs2: fs2,
-		opt: &opt,
+		fs1:       fs1,
+		fs2:       fs2,
+		opt:       &opt,
+		DebugName: opt.DebugName,
 	}
 
 	if opt.CheckFilename == "" {
@@ -50,14 +83,25 @@ func Bisync(ctx context.Context, fs1, fs2 fs.Fs, optArg *Options) (err error) {
 	if opt.Workdir == "" {
 		opt.Workdir = DefaultWorkdir
 	}
+	ci := fs.GetConfig(ctx)
+	opt.OrigBackupDir = ci.BackupDir
 
-	if !opt.DryRun && !opt.Force {
-		if fs1.Precision() == fs.ModTimeNotSupported {
-			return errors.New("modification time support is missing on path1")
-		}
-		if fs2.Precision() == fs.ModTimeNotSupported {
-			return errors.New("modification time support is missing on path2")
-		}
+	if ci.TerminalColorMode == fs.TerminalColorModeAlways || (ci.TerminalColorMode == fs.TerminalColorModeAuto && !log.Redirected()) {
+		ColorsLock.Lock()
+		Colors = true
+		ColorsLock.Unlock()
+	}
+
+	err = b.setCompareDefaults(ctx)
+	if err != nil {
+		return err
+	}
+
+	b.setResyncDefaults()
+
+	err = b.setResolveDefaults()
+	if err != nil {
+		return err
 	}
 
 	if b.workDir, err = filepath.Abs(opt.Workdir); err != nil {
@@ -68,41 +112,64 @@ func Bisync(ctx context.Context, fs1, fs2 fs.Fs, optArg *Options) (err error) {
 	}
 
 	// Produce a unique name for the sync operation
-	b.basePath = filepath.Join(b.workDir, bilib.SessionName(b.fs1, b.fs2))
-	listing1 := b.basePath + ".path1.lst"
-	listing2 := b.basePath + ".path2.lst"
+	b.basePath = bilib.BasePath(ctx, b.workDir, b.fs1, b.fs2)
+	b.listing1 = b.basePath + ".path1.lst"
+	b.listing2 = b.basePath + ".path2.lst"
+	b.newListing1 = b.listing1 + "-new"
+	b.newListing2 = b.listing2 + "-new"
+	b.aliases = bilib.AliasMap{}
+
+	err = b.checkSyntax()
+	if err != nil {
+		return err
+	}
 
 	// Handle lock file
-	lockFile := ""
-	if !opt.DryRun {
-		lockFile = b.basePath + ".lck"
-		if bilib.FileExists(lockFile) {
-			return fmt.Errorf("prior lock file found: %s", lockFile)
-		}
-
-		pidStr := []byte(strconv.Itoa(os.Getpid()))
-		if err = ioutil.WriteFile(lockFile, pidStr, bilib.PermSecure); err != nil {
-			return fmt.Errorf("cannot create lock file: %s: %w", lockFile, err)
-		}
-		fs.Debugf(nil, "Lock file created: %s", lockFile)
+	err = b.setLockFile()
+	if err != nil {
+		return err
 	}
+
+	b.queueOpt.logger = operations.NewLoggerOpt()
 
 	// Handle SIGINT
 	var finaliseOnce gosync.Once
-	markFailed := func(file string) {
-		failFile := file + "-err"
-		if bilib.FileExists(file) {
-			_ = os.Remove(failFile)
-			_ = os.Rename(file, failFile)
-		}
-	}
+
 	finalise := func() {
 		finaliseOnce.Do(func() {
 			if atexit.Signalled() {
-				fs.Logf(nil, "Bisync interrupted. Must run --resync to recover.")
-				markFailed(listing1)
-				markFailed(listing2)
-				_ = os.Remove(lockFile)
+				if b.opt.Resync {
+					fs.Log(nil, Color(terminal.GreenFg, "No need to gracefully shutdown during --resync (just run it again.)"))
+				} else {
+					fs.Log(nil, Color(terminal.YellowFg, "Attempting to gracefully shutdown. (Send exit signal again for immediate un-graceful shutdown.)"))
+					b.InGracefulShutdown = true
+					if b.SyncCI != nil {
+						fs.Infoc(nil, Color(terminal.YellowFg, "Telling Sync to wrap up early."))
+						b.SyncCI.MaxTransfer = 1
+						b.SyncCI.MaxDuration = fs.Duration(1 * time.Second)
+						b.SyncCI.CutoffMode = fs.CutoffModeSoft
+						gracePeriod := 30 * time.Second // TODO: flag to customize this?
+						if !waitFor("Canceling Sync if not done in", gracePeriod, func() bool { return b.CleanupCompleted }) {
+							fs.Log(nil, Color(terminal.YellowFg, "Canceling sync and cleaning up"))
+							b.CancelSync()
+							waitFor("Aborting Bisync if not done in", 60*time.Second, func() bool { return b.CleanupCompleted })
+						}
+					} else {
+						// we haven't started to sync yet, so we're good.
+						// no need to worry about the listing files, as we haven't overwritten them yet.
+						b.CleanupCompleted = true
+						fs.Log(nil, Color(terminal.GreenFg, "Graceful shutdown completed successfully."))
+					}
+				}
+				if !b.CleanupCompleted {
+					if !b.opt.Resync {
+						fs.Log(nil, Color(terminal.HiRedFg, "Graceful shutdown failed."))
+						fs.Log(nil, Color(terminal.RedFg, "Bisync interrupted. Must run --resync to recover."))
+					}
+					markFailed(b.listing1)
+					markFailed(b.listing2)
+				}
+				err = b.removeLockFile()
 			}
 		})
 	}
@@ -110,49 +177,60 @@ func Bisync(ctx context.Context, fs1, fs2 fs.Fs, optArg *Options) (err error) {
 	defer atexit.Unregister(fnHandle)
 
 	// run bisync
-	err = b.runLocked(ctx, listing1, listing2)
+	err = b.runLocked(ctx)
 
-	if lockFile != "" {
-		errUnlock := os.Remove(lockFile)
-		if errUnlock == nil {
-			fs.Debugf(nil, "Lock file removed: %s", lockFile)
-		} else if err == nil {
-			err = errUnlock
-		} else {
-			fs.Errorf(nil, "cannot remove lockfile %s: %v", lockFile, errUnlock)
+	removeLockErr := b.removeLockFile()
+	if err == nil {
+		err = removeLockErr
+	}
+
+	b.CleanupCompleted = true
+	if b.InGracefulShutdown {
+		if err == context.Canceled || err == accounting.ErrorMaxTransferLimitReachedGraceful {
+			err = nil
+			b.critical = false
+		}
+		if err == nil {
+			fs.Log(nil, Color(terminal.GreenFg, "Graceful shutdown completed successfully."))
 		}
 	}
 
 	if b.critical {
-		if bilib.FileExists(listing1) {
-			_ = os.Rename(listing1, listing1+"-err")
+		if b.retryable && b.opt.Resilient && !b.opt.Resync {
+			fs.Errorf(nil, Color(terminal.RedFg, "Bisync critical error: %v"), err)
+			fs.Error(nil, Color(terminal.YellowFg, "Bisync aborted. Error is retryable without --resync due to --resilient mode."))
+		} else {
+			if bilib.FileExists(b.listing1) {
+				_ = os.Rename(b.listing1, b.listing1+"-err")
+			}
+			if bilib.FileExists(b.listing2) {
+				_ = os.Rename(b.listing2, b.listing2+"-err")
+			}
+			fs.Errorf(nil, Color(terminal.RedFg, "Bisync critical error: %v"), err)
+			fs.Error(nil, Color(terminal.RedFg, "Bisync aborted. Must run --resync to recover."))
 		}
-		if bilib.FileExists(listing2) {
-			_ = os.Rename(listing2, listing2+"-err")
-		}
-		fs.Errorf(nil, "Bisync critical error: %v", err)
-		fs.Errorf(nil, "Bisync aborted. Must run --resync to recover.")
 		return ErrBisyncAborted
 	}
-	if b.abort {
-		fs.Logf(nil, "Bisync aborted. Please try again.")
+	if b.abort && !b.InGracefulShutdown {
+		fs.Log(nil, Color(terminal.RedFg, "Bisync aborted. Please try again."))
 	}
 	if err == nil {
-		fs.Infof(nil, "Bisync successful")
+		fs.Infoc(nil, Color(terminal.GreenFg, "Bisync successful"))
 	}
 	return err
 }
 
 // runLocked performs a full bisync run
-func (b *bisyncRun) runLocked(octx context.Context, listing1, listing2 string) (err error) {
+func (b *bisyncRun) runLocked(octx context.Context) (err error) {
 	opt := b.opt
 	path1 := bilib.FsPath(b.fs1)
 	path2 := bilib.FsPath(b.fs2)
 
 	if opt.CheckSync == CheckSyncOnly {
 		fs.Infof(nil, "Validating listings for Path1 %s vs Path2 %s", quotePath(path1), quotePath(path2))
-		if err = b.checkSync(listing1, listing2); err != nil {
+		if err = b.checkSync(b.listing1, b.listing2); err != nil {
 			b.critical = true
+			b.retryable = true
 		}
 		return err
 	}
@@ -161,14 +239,16 @@ func (b *bisyncRun) runLocked(octx context.Context, listing1, listing2 string) (
 
 	if opt.DryRun {
 		// In --dry-run mode, preserve original listings and save updates to the .lst-dry files
-		origListing1 := listing1
-		origListing2 := listing2
-		listing1 += "-dry"
-		listing2 += "-dry"
-		if err := bilib.CopyFileIfExists(origListing1, listing1); err != nil {
+		origListing1 := b.listing1
+		origListing2 := b.listing2
+		b.listing1 += "-dry"
+		b.listing2 += "-dry"
+		b.newListing1 = b.listing1 + "-new"
+		b.newListing2 = b.listing2 + "-new"
+		if err := bilib.CopyFileIfExists(origListing1, b.listing1); err != nil {
 			return err
 		}
-		if err := bilib.CopyFileIfExists(origListing2, listing2); err != nil {
+		if err := bilib.CopyFileIfExists(origListing2, b.listing2); err != nil {
 			return err
 		}
 	}
@@ -177,25 +257,68 @@ func (b *bisyncRun) runLocked(octx context.Context, listing1, listing2 string) (
 	var fctx context.Context
 	if fctx, err = b.opt.applyFilters(octx); err != nil {
 		b.critical = true
+		b.retryable = true
 		return
+	}
+	b.octx = octx
+	b.fctx = fctx
+
+	// overlapping paths check
+	err = b.overlappingPathsCheck(fctx, b.fs1, b.fs2)
+	if err != nil {
+		b.critical = true
+		b.retryable = true
+		return err
 	}
 
 	// Generate Path1 and Path2 listings and copy any unique Path2 files to Path1
 	if opt.Resync {
-		return b.resync(octx, fctx, listing1, listing2)
+		return b.resync(fctx)
 	}
 
 	// Check for existence of prior Path1 and Path2 listings
-	if !bilib.FileExists(listing1) || !bilib.FileExists(listing2) {
-		// On prior critical error abort, the prior listings are renamed to .lst-err to lock out further runs
+	if !bilib.FileExists(b.listing1) || !bilib.FileExists(b.listing2) {
+		if b.opt.Recover && bilib.FileExists(b.listing1+"-old") && bilib.FileExists(b.listing2+"-old") {
+			errTip := fmt.Sprintf(Color(terminal.CyanFg, "Path1: %s\n"), Color(terminal.HiBlueFg, b.listing1))
+			errTip += fmt.Sprintf(Color(terminal.CyanFg, "Path2: %s"), Color(terminal.HiBlueFg, b.listing2))
+			fs.Log(nil, Color(terminal.YellowFg, "Listings not found. Reverting to prior backup as --recover is set. \n")+errTip)
+			if opt.CheckSync != CheckSyncFalse {
+				// Run CheckSync to ensure old listing is valid (garbage in, garbage out!)
+				fs.Infof(nil, "Validating backup listings for Path1 %s vs Path2 %s", quotePath(path1), quotePath(path2))
+				if err = b.checkSync(b.listing1+"-old", b.listing2+"-old"); err != nil {
+					b.critical = true
+					b.retryable = true
+					return err
+				}
+				fs.Infoc(nil, Color(terminal.GreenFg, "Backup listing is valid."))
+			}
+			b.revertToOldListings()
+		} else {
+			// On prior critical error abort, the prior listings are renamed to .lst-err to lock out further runs
+			b.critical = true
+			b.retryable = true
+			errTip := Color(terminal.MagentaFg, "Tip: here are the filenames we were looking for. Do they exist? \n")
+			errTip += fmt.Sprintf(Color(terminal.CyanFg, "Path1: %s\n"), Color(terminal.HiBlueFg, b.listing1))
+			errTip += fmt.Sprintf(Color(terminal.CyanFg, "Path2: %s\n"), Color(terminal.HiBlueFg, b.listing2))
+			errTip += Color(terminal.MagentaFg, "Try running this command to inspect the work dir: \n")
+			errTip += fmt.Sprintf(Color(terminal.HiCyanFg, "rclone lsl \"%s\""), b.workDir)
+
+			return errors.New("cannot find prior Path1 or Path2 listings, likely due to critical error on prior run \n" + errTip)
+		}
+	}
+
+	fs.Infof(nil, "Building Path1 and Path2 listings")
+	b.march.ls1, b.march.ls2, err = b.makeMarchListing(fctx)
+	if err != nil || accounting.Stats(fctx).Errored() {
+		fs.Error(nil, Color(terminal.RedFg, "There were errors while building listings. Aborting as it is too dangerous to continue."))
 		b.critical = true
-		return errors.New("cannot find prior Path1 or Path2 listings, likely due to critical error on prior run")
+		b.retryable = true
+		return err
 	}
 
 	// Check for Path1 deltas relative to the prior sync
 	fs.Infof(nil, "Path1 checking for diffs")
-	newListing1 := listing1 + "-new"
-	ds1, err := b.findDeltas(fctx, b.fs1, listing1, newListing1, "Path1")
+	ds1, err := b.findDeltas(fctx, b.fs1, b.listing1, b.march.ls1, "Path1")
 	if err != nil {
 		return err
 	}
@@ -203,8 +326,7 @@ func (b *bisyncRun) runLocked(octx context.Context, listing1, listing2 string) (
 
 	// Check for Path2 deltas relative to the prior sync
 	fs.Infof(nil, "Path2 checking for diffs")
-	newListing2 := listing2 + "-new"
-	ds2, err := b.findDeltas(fctx, b.fs2, listing2, newListing2, "Path2")
+	ds2, err := b.findDeltas(fctx, b.fs2, b.listing2, b.march.ls2, "Path2")
 	if err != nil {
 		return err
 	}
@@ -216,6 +338,7 @@ func (b *bisyncRun) runLocked(octx context.Context, listing1, listing2 string) (
 		err = b.checkAccess(ds1.checkFiles, ds2.checkFiles)
 		if err != nil {
 			b.critical = true
+			b.retryable = true
 			return
 		}
 	}
@@ -247,36 +370,50 @@ func (b *bisyncRun) runLocked(octx context.Context, listing1, listing2 string) (
 
 	// Determine and apply changes to Path1 and Path2
 	noChanges := ds1.empty() && ds2.empty()
-	changes1 := false
-	changes2 := false
+	results2to1 := []Results{}
+	results1to2 := []Results{}
+
+	queues := queues{}
+
 	if noChanges {
 		fs.Infof(nil, "No changes found")
 	} else {
 		fs.Infof(nil, "Applying changes")
-		changes1, changes2, err = b.applyDeltas(octx, ds1, ds2)
+		results2to1, results1to2, queues, err = b.applyDeltas(octx, ds1, ds2)
 		if err != nil {
-			b.critical = true
-			return err
+			if b.InGracefulShutdown && (err == context.Canceled || err == accounting.ErrorMaxTransferLimitReachedGraceful || strings.Contains(err.Error(), "context canceled")) {
+				fs.Infof(nil, "Ignoring sync error due to Graceful Shutdown: %v", err)
+			} else {
+				b.critical = true
+				// b.retryable = true // not sure about this one
+				return err
+			}
 		}
 	}
 
 	// Clean up and check listings integrity
 	fs.Infof(nil, "Updating listings")
 	var err1, err2 error
+	if b.DebugName != "" {
+		l1, _ := b.loadListing(b.listing1)
+		l2, _ := b.loadListing(b.listing2)
+		newl1, _ := b.loadListing(b.newListing1)
+		newl2, _ := b.loadListing(b.newListing2)
+		b.debug(b.DebugName, fmt.Sprintf("pre-saveOldListings, ls1 has name?: %v, ls2 has name?: %v", l1.has(b.DebugName), l2.has(b.DebugName)))
+		b.debug(b.DebugName, fmt.Sprintf("pre-saveOldListings, newls1 has name?: %v, ls2 has name?: %v", newl1.has(b.DebugName), newl2.has(b.DebugName)))
+	}
+	b.saveOldListings()
+	// save new listings
 	if noChanges {
-		err1 = bilib.CopyFileIfExists(newListing1, listing1)
-		err2 = bilib.CopyFileIfExists(newListing2, listing2)
+		b.replaceCurrentListings()
 	} else {
-		if changes1 {
-			_, err1 = b.makeListing(fctx, b.fs1, listing1)
-		} else {
-			err1 = bilib.CopyFileIfExists(newListing1, listing1)
-		}
-		if changes2 {
-			_, err2 = b.makeListing(fctx, b.fs2, listing2)
-		} else {
-			err2 = bilib.CopyFileIfExists(newListing2, listing2)
-		}
+		err1 = b.modifyListing(fctx, b.fs2, b.fs1, results2to1, queues, false) // 2to1
+		err2 = b.modifyListing(fctx, b.fs1, b.fs2, results1to2, queues, true)  // 1to2
+	}
+	if b.DebugName != "" {
+		l1, _ := b.loadListing(b.listing1)
+		l2, _ := b.loadListing(b.listing2)
+		b.debug(b.DebugName, fmt.Sprintf("post-modifyListing, ls1 has name?: %v, ls2 has name?: %v", l1.has(b.DebugName), l2.has(b.DebugName)))
 	}
 	err = err1
 	if err == nil {
@@ -284,17 +421,18 @@ func (b *bisyncRun) runLocked(octx context.Context, listing1, listing2 string) (
 	}
 	if err != nil {
 		b.critical = true
+		b.retryable = true
 		return err
 	}
 
 	if !opt.NoCleanup {
-		_ = os.Remove(newListing1)
-		_ = os.Remove(newListing2)
+		_ = os.Remove(b.newListing1)
+		_ = os.Remove(b.newListing2)
 	}
 
 	if opt.CheckSync == CheckSyncTrue && !opt.DryRun {
 		fs.Infof(nil, "Validating listings for Path1 %s vs Path2 %s", quotePath(path1), quotePath(path2))
-		if err := b.checkSync(listing1, listing2); err != nil {
+		if err := b.checkSync(b.listing1, b.listing2); err != nil {
 			b.critical = true
 			return err
 		}
@@ -303,7 +441,9 @@ func (b *bisyncRun) runLocked(octx context.Context, listing1, listing2 string) (
 	// Optional rmdirs for empty directories
 	if opt.RemoveEmptyDirs {
 		fs.Infof(nil, "Removing empty directories")
+		fctx = b.setBackupDir(fctx, 1)
 		err1 := operations.Rmdirs(fctx, b.fs1, "", true)
+		fctx = b.setBackupDir(fctx, 2)
 		err2 := operations.Rmdirs(fctx, b.fs2, "", true)
 		err := err1
 		if err == nil {
@@ -311,83 +451,11 @@ func (b *bisyncRun) runLocked(octx context.Context, listing1, listing2 string) (
 		}
 		if err != nil {
 			b.critical = true
+			b.retryable = true
 			return err
 		}
 	}
 
-	return nil
-}
-
-// resync implements the --resync mode.
-// It will generate path1 and path2 listings
-// and copy any unique path2 files to path1.
-func (b *bisyncRun) resync(octx, fctx context.Context, listing1, listing2 string) error {
-	fs.Infof(nil, "Copying unique Path2 files to Path1")
-
-	newListing1 := listing1 + "-new"
-	filesNow1, err := b.makeListing(fctx, b.fs1, newListing1)
-	if err == nil {
-		err = b.checkListing(filesNow1, newListing1, "current Path1")
-	}
-	if err != nil {
-		return err
-	}
-
-	newListing2 := listing2 + "-new"
-	filesNow2, err := b.makeListing(fctx, b.fs2, newListing2)
-	if err == nil {
-		err = b.checkListing(filesNow2, newListing2, "current Path2")
-	}
-	if err != nil {
-		return err
-	}
-
-	copy2to1 := []string{}
-	for _, file := range filesNow2.list {
-		if !filesNow1.has(file) {
-			b.indent("Path2", file, "Resync will copy to Path1")
-			copy2to1 = append(copy2to1, file)
-		}
-	}
-
-	if len(copy2to1) > 0 {
-		b.indent("Path2", "Path1", "Resync is doing queued copies to")
-		// octx does not have extra filters!
-		err = b.fastCopy(octx, b.fs2, b.fs1, bilib.ToNames(copy2to1), "resync-copy2to1")
-		if err != nil {
-			b.critical = true
-			return err
-		}
-	}
-
-	fs.Infof(nil, "Resynching Path1 to Path2")
-	ctxRun := b.opt.setDryRun(fctx)
-	// fctx has our extra filters added!
-	ctxSync, filterSync := filter.AddConfig(ctxRun)
-	if filterSync.Opt.MinSize == -1 {
-		// prevent overwriting Google Doc files (their size is -1)
-		filterSync.Opt.MinSize = 0
-	}
-	if err = sync.Sync(ctxSync, b.fs2, b.fs1, false); err != nil {
-		b.critical = true
-		return err
-	}
-
-	fs.Infof(nil, "Resync updating listings")
-	if _, err = b.makeListing(fctx, b.fs1, listing1); err != nil {
-		b.critical = true
-		return err
-	}
-
-	if _, err = b.makeListing(fctx, b.fs2, listing2); err != nil {
-		b.critical = true
-		return err
-	}
-
-	if !b.opt.NoCleanup {
-		_ = os.Remove(newListing1)
-		_ = os.Remove(newListing2)
-	}
 	return nil
 }
 
@@ -404,17 +472,20 @@ func (b *bisyncRun) checkSync(listing1, listing2 string) error {
 
 	ok := true
 	for _, file := range files1.list {
-		if !files2.has(file) {
+		if !files2.has(file) && !files2.has(b.aliases.Alias(file)) {
 			b.indent("ERROR", file, "Path1 file not found in Path2")
+			ok = false
+		} else if !b.fileInfoEqual(file, files2.getTryAlias(file, b.aliases.Alias(file)), files1, files2) {
 			ok = false
 		}
 	}
 	for _, file := range files2.list {
-		if !files1.has(file) {
+		if !files1.has(file) && !files1.has(b.aliases.Alias(file)) {
 			b.indent("ERROR", file, "Path2 file not found in Path1")
 			ok = false
 		}
 	}
+
 	if !ok {
 		return errors.New("path1 and path2 are out of sync, run --resync to recover")
 	}
@@ -430,6 +501,9 @@ func (b *bisyncRun) checkAccess(checkFiles1, checkFiles2 bilib.Names) error {
 	numChecks1 := len(checkFiles1)
 	numChecks2 := len(checkFiles2)
 	if numChecks1 == 0 || numChecks1 != numChecks2 {
+		if numChecks1 == 0 && numChecks2 == 0 {
+			fs.Logf("--check-access", Color(terminal.RedFg, "Failed to find any files named %s\n More info: %s"), Color(terminal.CyanFg, opt.CheckFilename), Color(terminal.BlueFg, "https://rclone.org/bisync/#check-access"))
+		}
 		fs.Errorf(nil, "%s Path1 count %d, Path2 count %d - %s", prefix, numChecks1, numChecks2, opt.CheckFilename)
 		ok = false
 	}
@@ -453,4 +527,121 @@ func (b *bisyncRun) checkAccess(checkFiles1, checkFiles2 bilib.Names) error {
 	}
 	fs.Infof(nil, "Found %d matching %q files on both paths", numChecks1, opt.CheckFilename)
 	return nil
+}
+
+func (b *bisyncRun) testFn() {
+	if b.opt.TestFn != nil {
+		b.opt.TestFn()
+	}
+}
+
+func (b *bisyncRun) handleErr(o any, msg string, err error, critical, retryable bool) {
+	if err != nil {
+		if retryable {
+			b.retryable = true
+		}
+		if critical {
+			b.critical = true
+			b.abort = true
+			fs.Errorf(o, "%s: %v", msg, err)
+		} else {
+			fs.Infof(o, "%s: %v", msg, err)
+		}
+	}
+}
+
+// setBackupDir overrides --backup-dir with path-specific version, if set, in each direction
+func (b *bisyncRun) setBackupDir(ctx context.Context, destPath int) context.Context {
+	ci := fs.GetConfig(ctx)
+	ci.BackupDir = b.opt.OrigBackupDir
+	if destPath == 1 && b.opt.BackupDir1 != "" {
+		ci.BackupDir = b.opt.BackupDir1
+	}
+	if destPath == 2 && b.opt.BackupDir2 != "" {
+		ci.BackupDir = b.opt.BackupDir2
+	}
+	fs.Debugf(ci.BackupDir, "updated backup-dir for Path%d", destPath)
+	return ctx
+}
+
+func (b *bisyncRun) overlappingPathsCheck(fctx context.Context, fs1, fs2 fs.Fs) (err error) {
+	if operations.OverlappingFilterCheck(fctx, fs2, fs1) {
+		err = errors.New(Color(terminal.RedFg, "Overlapping paths detected. Cannot bisync between paths that overlap, unless excluded by filters."))
+		return err
+	}
+	// need to test our BackupDirs too, as sync will be fooled by our --files-from filters
+	testBackupDir := func(ctx context.Context, destPath int) error {
+		src := fs1
+		dst := fs2
+		if destPath == 1 {
+			src = fs2
+			dst = fs1
+		}
+		ctxBackupDir := b.setBackupDir(ctx, destPath)
+		ci := fs.GetConfig(ctxBackupDir)
+		if ci.BackupDir != "" {
+			// operations.BackupDir should return an error if not properly excluded
+			_, err = operations.BackupDir(fctx, dst, src, "")
+			return err
+		}
+		return nil
+	}
+	err = testBackupDir(fctx, 1)
+	if err != nil {
+		return err
+	}
+	err = testBackupDir(fctx, 2)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (b *bisyncRun) checkSyntax() (err error) {
+	// check for odd number of quotes in path, usually indicating an escaping issue
+	path1 := bilib.FsPath(b.fs1)
+	path2 := bilib.FsPath(b.fs2)
+	if strings.Count(path1, `"`)%2 != 0 || strings.Count(path2, `"`)%2 != 0 {
+		return fmt.Errorf(Color(terminal.RedFg, `detected an odd number of quotes in your path(s). This is usually a mistake indicating incorrect escaping.
+			 Please check your command and try again. Note that on Windows, quoted paths must not have a trailing slash, or it will be interpreted as escaping the quote. path1: %v path2: %v`), path1, path2)
+	}
+	// check for other syntax issues
+	_, err = os.Stat(b.basePath)
+	if err != nil {
+		if strings.Contains(err.Error(), "syntax is incorrect") {
+			return fmt.Errorf(Color(terminal.RedFg, `syntax error detected in your path(s). Please check your command and try again.
+				 Note that on Windows, quoted paths must not have a trailing slash, or it will be interpreted as escaping the quote. path1: %v path2: %v error: %v`), path1, path2, err)
+		}
+	}
+	if runtime.GOOS == "windows" && (strings.Contains(path1, " --") || strings.Contains(path2, " --")) {
+		return fmt.Errorf(Color(terminal.RedFg, `detected possible flags in your path(s). This is usually a mistake indicating incorrect escaping or quoting (possibly closing quote is missing?).
+			 Please check your command and try again. Note that on Windows, quoted paths must not have a trailing slash, or it will be interpreted as escaping the quote. path1: %v path2: %v`), path1, path2)
+	}
+	return nil
+}
+
+func (b *bisyncRun) debug(nametocheck, msgiftrue string) {
+	if b.DebugName != "" && b.DebugName == nametocheck {
+		fs.Infoc(Color(terminal.MagentaBg, "DEBUGNAME "+b.DebugName), Color(terminal.MagentaBg, msgiftrue))
+	}
+}
+
+func (b *bisyncRun) debugFn(nametocheck string, fn func()) {
+	if b.DebugName != "" && b.DebugName == nametocheck {
+		fn()
+	}
+}
+
+// waitFor runs fn() until it returns true or the timeout expires
+func waitFor(msg string, totalWait time.Duration, fn func() bool) (ok bool) {
+	const individualWait = 1 * time.Second
+	for i := range int(totalWait / individualWait) {
+		ok = fn()
+		if ok {
+			return ok
+		}
+		fs.Infof(nil, Color(terminal.YellowFg, "%s: %vs"), msg, int(totalWait/individualWait)-i)
+		time.Sleep(individualWait)
+	}
+	return false
 }

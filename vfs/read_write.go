@@ -5,12 +5,11 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/log"
 	"github.com/rclone/rclone/vfs/vfscache"
-
-
 
 	// delta from read.go
 	"context"
@@ -20,7 +19,6 @@ import (
 	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/chunkedreader"
 	"github.com/rclone/rclone/fs/hash"
-
 	// from vfscache/item.go
 	// "github.com/rclone/rclone/lib/ranges" DEPRECATED
 )
@@ -31,7 +29,7 @@ import (
 // transferred to the remote.
 type RWFileHandle struct {
 	baseHandle
-	
+
 	// read only variables
 	file  *File
 	d     *Dir
@@ -41,30 +39,30 @@ type RWFileHandle struct {
 	// read write variables protected by mutex
 	mu          sync.Mutex
 	offset      int64 // file pointer offset
-	closed      bool  // set if handle has been closed
-	opened      bool
-	writeCalled bool // if any Write() methods have been called
+	writeCalled bool  // if any Write() methods have been called
 
-
-	done        func(ctx context.Context, err error)
+	done func(ctx context.Context, err error)
 	// mu          sync.Mutex
-	cond        *sync.Cond // cond lock for out of sequence reads
+	cond sync.Cond // cond lock for out of sequence reads
 	// closed      bool       // set if handle has been closed
-	r           *accounting.Account
-	readCalled  bool  // set if read has been called
-	size        int64 // size of the object (0 for unknown length)
+	r    *accounting.Account
+	size int64 // size of the object (0 for unknown length)
 	// offset      int64 // offset of read of o
-	roffset     int64 // offset of Read() calls
-	noSeek      bool
-	sizeUnknown bool // set if size of source is not known
+	roffset int64 // offset of Read() calls
 	// file        *File
-	hash        *hash.MultiHasher
+	hash *hash.MultiHasher
 	// opened      bool
-	remote      string
+	remote string
 	// jellygrail custom
 	currentDirectReadMode bool
-	openedSource bool
-	openedCache bool
+	openedSource          bool
+	openedCache           bool
+
+	closed      bool // set if handle has been closed
+	readCalled  bool // set if read has been called
+	noSeek      bool
+	sizeUnknown bool // set if size of source is not known
+	opened      bool
 }
 
 // Check interfaces
@@ -75,13 +73,22 @@ var (
 	_ io.Closer   = (*RWFileHandle)(nil)
 )
 
+// Lock performs Unix locking, not supported
+func (fh *RWFileHandle) Lock() error {
+	return os.ErrInvalid
+}
+
+// Unlock performs Unix unlocking, not supported
+func (fh *RWFileHandle) Unlock() error {
+	return os.ErrInvalid
+}
 
 func newRWFileHandle(d *Dir, f *File, flags int) (fh *RWFileHandle, err error) {
 	var mhash *hash.MultiHasher
 	o := f.getObject()
 	defer log.Trace(f.Path(), "")("err=%v", &err)
 	// get an item to represent this from the cache
-	item := d.vfs.cache.Item(f.Path())
+	item := d.vfs.cache.Item(f.CachePath())
 
 	if !f.VFS().Opt.NoChecksum {
 		hashes := hash.NewHashSet(o.Fs().Hashes().GetOne()) // just pick one hash
@@ -105,8 +112,8 @@ func newRWFileHandle(d *Dir, f *File, flags int) (fh *RWFileHandle, err error) {
 		item:  item,
 
 		// from read.go
-		remote:      o.Remote(),
-		noSeek:      f.VFS().Opt.NoSeek,
+		remote: o.Remote(),
+		noSeek: f.VFS().Opt.NoSeek,
 		// file:        f,
 		hash:        mhash,
 		size:        nonNegative(o.Size()),
@@ -128,7 +135,7 @@ func newRWFileHandle(d *Dir, f *File, flags int) (fh *RWFileHandle, err error) {
 	}
 
 	// from read.go :
-	fh.cond = sync.NewCond(&fh.mu) 
+	fh.cond = sync.Cond{L: &fh.mu}
 	return fh, nil
 }
 
@@ -168,7 +175,7 @@ func (fh *RWFileHandle) openPending() (err error) {
 		fh.offset = 0
 	}
 	fh.opened = true
-	fh.openedCache = true // jellygrail custom
+	fh.openedCache = true   // jellygrail custom
 	fh.d.addObject(fh.file) // make sure the directory has this object in it now
 	return nil
 }
@@ -177,17 +184,18 @@ func (fh *RWFileHandle) openPending() (err error) {
 // openPending opens the file if there is a pending open
 // call with the lock held
 func (fh *RWFileHandle) openPendingSource() (err error) {
-	if fh.openedSource {
+	if fh.opened {
 		return nil
 	}
 	o := fh.file.getObject()
-	r, err := chunkedreader.New(context.TODO(), o, int64(fh.file.VFS().Opt.ChunkSize), int64(fh.file.VFS().Opt.ChunkSizeLimit)).Open()
+	opt := &fh.file.VFS().Opt
+	r, err := chunkedreader.New(fh.file.ctx, o, int64(opt.ChunkSize), int64(opt.ChunkSizeLimit), opt.ChunkStreams).Open()
 	if err != nil {
 		return err
 	}
-	tr := accounting.GlobalStats().NewTransfer(o)
+	tr := accounting.GlobalStats().NewTransfer(o, nil)
 	fh.done = tr.Done
-	fh.r = tr.Account(context.TODO(), r).WithBuffer() // account the transfer
+	fh.r = tr.Account(fh.file.ctx, r).WithBuffer() // account the transfer
 	fh.opened = true
 	fh.openedSource = true // jellygrail custom
 
@@ -229,7 +237,7 @@ func (fh *RWFileHandle) updateSize() {
 // close the file handle returning EBADF if it has been
 // closed already.
 //
-// Must be called with fh.mu held
+// Must be called with fh.mu held.
 //
 // Note that we leave the file around in the cache on error conditions
 // to give the user a chance to recover it.
@@ -243,7 +251,7 @@ func (fh *RWFileHandle) close() (err error) {
 	}
 
 	fh.closed = true
-	
+
 	fh.updateSize()
 	if fh.openedCache {
 		err = fh.item.Close(fh.file.setObject)
@@ -266,8 +274,6 @@ func (fh *RWFileHandle) closeSource() error {
 		return ECLOSED
 	}
 	fh.closed = true
-	
-	
 
 	if fh.opened {
 		var err error
@@ -281,12 +287,12 @@ func (fh *RWFileHandle) closeSource() error {
 			}
 		}
 		// TODO-jellygrail: err overwrritten below, tofix
-			
+
 		if fh.openedSource {
 			fh.opened = false
 			fh.openedSource = false
 			defer func() {
-				fh.done(context.TODO(), err)
+				fh.done(fh.file.ctx, err)
 			}()
 			// Close first so that we have hashes
 			err = fh.r.Close()
@@ -299,8 +305,7 @@ func (fh *RWFileHandle) closeSource() error {
 				return err
 			}
 		}
-		
-		
+
 	}
 	return nil
 }
@@ -310,9 +315,9 @@ func (fh *RWFileHandle) Close() error {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
 
-	if(!fh.currentDirectReadMode){
+	if !fh.currentDirectReadMode {
 		return fh.close()
-	}else{
+	} else {
 		return fh.closeSource()
 	}
 
@@ -323,36 +328,36 @@ func (fh *RWFileHandle) Close() error {
 // single opened file, Flush can be called multiple times.
 func (fh *RWFileHandle) Flush() error {
 
-	if(!fh.currentDirectReadMode){
+	if !fh.currentDirectReadMode {
 
 		fh.mu.Lock()
 		fs.Debugf(fh.logPrefix(), "RWFileHandle.Flush")
 		fh.updateSize()
 		fh.mu.Unlock()
 		return nil
-		
-	}else{
+
+	} else {
 		if fh.openedCache {
 			fh.updateSize()
 		}
-		
+
 		fh.mu.Lock()
 		defer fh.mu.Unlock()
 		if !fh.opened {
 			return nil
 		}
 		// fs.Debugf(fh.remote, "ReadFileHandle.Flush")
-	
+
 		if err := fh.checkHash(); err != nil {
 			fs.Errorf(fh.remote, "ReadFileHandle.Flush error: %v", err)
 			return err
 		}
-	
+
 		// fs.Debugf(fh.remote, "ReadFileHandle.Flush OK")
 		return nil
 
 	}
-		
+
 }
 
 // Release is called when we are finished with the file handle
@@ -360,13 +365,12 @@ func (fh *RWFileHandle) Flush() error {
 // It isn't called directly from userspace so the error is ignored by
 // the kernel
 func (fh *RWFileHandle) Release() error {
-	
+
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
 
+	if !fh.currentDirectReadMode {
 
-	if(!fh.currentDirectReadMode){
-		
 		fs.Debugf(fh.logPrefix(), "RWFileHandle.Release")
 		if fh.closed {
 			// Don't return an error if called twice
@@ -378,8 +382,8 @@ func (fh *RWFileHandle) Release() error {
 		}
 		return err
 
-	}else{
-		
+	} else {
+
 		if !fh.opened {
 			return nil
 		}
@@ -391,13 +395,13 @@ func (fh *RWFileHandle) Release() error {
 		err := fh.closeSource()
 		if err != nil {
 			fs.Errorf(fh.remote, "ReadFileHandle.Release error: %v", err)
-		} else {
+			//} else {
 			// fs.Debugf(fh.remote, "ReadFileHandle.Release OK")
 		}
 		return err
 
 	}
-		
+
 }
 
 // _size returns the size of the underlying file and also sets it in
@@ -439,7 +443,7 @@ func (fh *RWFileHandle) Stat() (os.FileInfo, error) {
 //
 // call with lock held
 func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool, DirectReadModeROCache bool) (n int, err error) {
-	
+
 	defer log.Trace(fh.logPrefix(), "size=%d, off=%d", len(b), off)("n=%d, err=%v", &n, &err)
 	if fh.closed {
 		return n, ECLOSED
@@ -458,17 +462,16 @@ func (fh *RWFileHandle) _readAt(b []byte, off int64, release bool, DirectReadMod
 		fh.mu.Unlock()
 	}
 	// if !DirectReadModeROCache {
-		// n, err = fh.item.ReadAt(b, off)
-		// fs.Debugf("### read_write.go _readAt CALLED ### (RW-CACHE) (atoffset=%s)", "")
+	// n, err = fh.item.ReadAt(b, off)
+	// fs.Debugf("### read_write.go _readAt CALLED ### (RW-CACHE) (atoffset=%s)", "")
 	// } else {
-		// n, err = fh.item.fd.ReadAt(b, off)
-		// n, err = fh.item.ReadAt(b, off, DirectReadModeROCache)
-		// fs.Debugf("### read_write.go _readAt CALLED ### (RO-CACHE) (atoffset=%s)", "")
+	// n, err = fh.item.fd.ReadAt(b, off)
+	// n, err = fh.item.ReadAt(b, off, DirectReadModeROCache)
+	// fs.Debugf("### read_write.go _readAt CALLED ### (RO-CACHE) (atoffset=%s)", "")
 	// }
 
 	n, err = fh.item.ReadAt(b, off, DirectReadModeROCache)
-	
-	
+
 	if release {
 		fh.mu.Lock()
 	}
@@ -482,7 +485,7 @@ func (fh *RWFileHandle) checkHash() error {
 
 	o := fh.file.getObject()
 	for hashType, dstSum := range fh.hash.Sums() {
-		srcSum, err := o.Hash(context.TODO(), hashType)
+		srcSum, err := o.Hash(fh.file.ctx, hashType)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				// if it was file not found then at
@@ -492,7 +495,7 @@ func (fh *RWFileHandle) checkHash() error {
 			return err
 		}
 		if !hash.Equals(dstSum, srcSum) {
-			return fmt.Errorf("corrupted on transfer: %v hash differ %q vs %q", hashType, dstSum, srcSum)
+			return fmt.Errorf("corrupted on transfer: %v hashes differ src %q vs dst %q", hashType, srcSum, dstSum)
 		}
 	}
 
@@ -503,7 +506,7 @@ func waitSequentialSource(what string, remote string, cond *sync.Cond, maxWait t
 	var (
 		timeout = time.NewTimer(maxWait)
 		done    = make(chan struct{})
-		abort   = false
+		abort   atomic.Int32
 	)
 	go func() {
 		select {
@@ -512,14 +515,14 @@ func waitSequentialSource(what string, remote string, cond *sync.Cond, maxWait t
 			// cond.Broadcast. NB cond.L == mu
 			cond.L.Lock()
 			// set abort flag and give all the waiting goroutines a kick on timeout
-			abort = true
+			abort.Store(1)
 			fs.Debugf(remote, "aborting in-sequence %s wait, off=%d", what, off)
 			cond.Broadcast()
 			cond.L.Unlock()
 		case <-done:
 		}
 	}()
-	for *poff != off && !abort {
+	for *poff != off && abort.Load() == 0 {
 		fs.Debugf(remote, "waiting for in-sequence %s to %d for %v", what, off, maxWait)
 		cond.Wait()
 	}
@@ -531,6 +534,7 @@ func waitSequentialSource(what string, remote string, cond *sync.Cond, maxWait t
 	}
 }
 
+// from read.go
 func (fh *RWFileHandle) seek(offset int64, reopen bool) (err error) {
 	if fh.noSeek {
 		return ESPIPE
@@ -546,14 +550,14 @@ func (fh *RWFileHandle) seek(offset int64, reopen bool) (err error) {
 	}
 	fh.r.StopBuffering() // stop the background reading first
 	oldReader := fh.r.GetReader()
-	r, ok := oldReader.(*chunkedreader.ChunkedReader)
+	r, ok := oldReader.(chunkedreader.ChunkedReader)
 	if !ok {
 		fs.Logf(fh.remote, "ReadFileHandle.Read expected reader to be a ChunkedReader, got %T", oldReader)
 		reopen = true
 	}
 	if !reopen {
 		fs.Debugf(fh.remote, "ReadFileHandle.seek from %d to %d (fs.RangeSeeker)", fh.offset, offset)
-		_, err = r.RangeSeek(context.TODO(), offset, io.SeekStart, -1)
+		_, err = r.RangeSeek(fh.file.ctx, offset, io.SeekStart, -1)
 		if err != nil {
 			fs.Debugf(fh.remote, "ReadFileHandle.Read fs.RangeSeeker failed: %v", err)
 			return err
@@ -567,7 +571,8 @@ func (fh *RWFileHandle) seek(offset int64, reopen bool) (err error) {
 		}
 		// re-open with a seek
 		o := fh.file.getObject()
-		r = chunkedreader.New(context.TODO(), o, int64(fh.file.VFS().Opt.ChunkSize), int64(fh.file.VFS().Opt.ChunkSizeLimit))
+		opt := &fh.file.VFS().Opt
+		r = chunkedreader.New(fh.file.ctx, o, int64(opt.ChunkSize), int64(opt.ChunkSizeLimit), opt.ChunkStreams)
 		_, err := r.Seek(offset, 0)
 		if err != nil {
 			fs.Debugf(fh.remote, "ReadFileHandle.Read seek failed: %v", err)
@@ -579,7 +584,7 @@ func (fh *RWFileHandle) seek(offset int64, reopen bool) (err error) {
 			return err
 		}
 	}
-	fh.r.UpdateReader(context.TODO(), r)
+	fh.r.UpdateReader(fh.file.ctx, r)
 	fh.offset = offset
 	return nil
 }
@@ -596,12 +601,9 @@ func (fh *RWFileHandle) readAtSource(p []byte, off int64) (n int, err error) {
 		fs.Errorf(fh.remote, "ReadFileHandle.Read error: %v", EBADF)
 		return 0, ECLOSED
 	}
-	maxBuf := 1024 * 1024
-	if len(p) < maxBuf {
-		maxBuf = len(p)
-	}
+	maxBuf := min(len(p), 1024*1024)
 	if gap := off - fh.offset; gap > 0 && gap < int64(8*maxBuf) {
-		waitSequentialSource("read", fh.remote, fh.cond, fh.file.VFS().Opt.ReadWait, &fh.offset, off)
+		waitSequentialSource("read", fh.remote, &fh.cond, time.Duration(fh.file.VFS().Opt.ReadWait), &fh.offset, off)
 	}
 	doSeek := off != fh.offset
 	if doSeek && fh.noSeek {
@@ -611,7 +613,7 @@ func (fh *RWFileHandle) readAtSource(p []byte, off int64) (n int, err error) {
 	retries := 0
 	reqSize := len(p)
 	doReopen := false
-	lowLevelRetries := fs.GetConfig(context.TODO()).LowLevelRetries
+	lowLevelRetries := fs.GetConfig(fh.file.ctx).LowLevelRetries
 	for {
 		if doSeek {
 			// Are we attempting to seek beyond the end of the
@@ -679,7 +681,6 @@ func (fh *RWFileHandle) readAtSource(p []byte, off int64) (n int, err error) {
 	return n, err
 }
 
-
 // ReadAt bytes from the file at off
 // merged with ReadAt from read.go
 func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
@@ -687,8 +688,8 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 	defer fh.mu.Unlock()
 	fs.Debugf("### read_write.go ReadAt CALLED / BEFORE-SWITCH ### ", "")
 
-	// jellygrail custom 
-	// ----- univeral switch 
+	// jellygrail custom
+	// ----- univeral switch
 	// ------between fd.read and readAtSource when dynmode (got with fh.item.AllowDirectReadUpdate)
 	// ------between fd.read RW ahead and RW simple
 	offset := off
@@ -698,12 +699,12 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 		size = itemSize - offset
 	}
 	// r := ranges.Range{Pos: offset, Size: size} DEPRECATED
-	
+
 	// present := fh.item.info.Rs.Present(r) DEPRECATED
 
 	present := fh.item.GetInfoRsPresent(offset, size)
-	
-	if(!fh.item.AllowDirectReadUpdate()){
+
+	if !fh.item.AllowDirectReadUpdate() {
 		if present {
 			fs.Debugf("### read_write.go ReadAt CALLED / FULL-MODE : Reads cache only ### ", "")
 		} else {
@@ -711,13 +712,13 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 		}
 		fh.currentDirectReadMode = false
 		// TODO: test of RW ahead and RW simple
-		return fh._readAt(b, off, true, present) 
-	}else{
-		
+		return fh._readAt(b, off, true, present)
+	} else {
+
 		fh.currentDirectReadMode = true
 
 		if present {
-			// switch to a custom _readAt without cache write 
+			// switch to a custom _readAt without cache write
 			fs.Debugf("### read_write.go ReadAt CALLED / FLAG-MODE : Reads cache only ### %s", "")
 			// fh.item.info.ATime = time.Now()
 			// Do the reading with Item.mu unlocked and cache protected by preAccess -> not needed as we never delete the "partial" "cache" in this forked version
@@ -727,7 +728,7 @@ func (fh *RWFileHandle) ReadAt(b []byte, off int64) (n int, err error) {
 		}
 		fs.Debugf("### read_write.go ReadAt CALLED / FLAG-MODE : Reads source only (slice missing) ### %s", "")
 		// ---- jellygrail custom
-		
+
 		return fh.readAtSource(b, off)
 	}
 }
@@ -737,13 +738,13 @@ func (fh *RWFileHandle) Read(b []byte) (n int, err error) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
 	fs.Debugf("### read_write.go Read CALLED NOT SUPPOSED TO BE ! ### %s", "")
-	if(!fh.item.AllowDirectReadUpdate()){
+	if !fh.item.AllowDirectReadUpdate() {
 		fh.currentDirectReadMode = false
 		n, err = fh._readAt(b, fh.offset, false, false)
 		fh.offset += int64(n)
 		return n, err
 
-	}else{
+	} else {
 		fh.currentDirectReadMode = true
 		if fh.roffset >= fh.size && !fh.sizeUnknown {
 			return 0, io.EOF
@@ -763,8 +764,8 @@ func (fh *RWFileHandle) Seek(offset int64, whence int) (ret int64, err error) {
 	defer fh.mu.Unlock()
 	fs.Debugf("### read_write.go Seek CALLED NOT SUPPOSED TO BE ! ### %s", "")
 
-	if(!fh.currentDirectReadMode){
-	
+	if !fh.currentDirectReadMode {
+
 		if fh.closed {
 			return 0, ECLOSED
 		}
@@ -784,7 +785,7 @@ func (fh *RWFileHandle) Seek(offset int64, whence int) (ret int64, err error) {
 		// we don't check the offset - the next Read will
 		return fh.offset, nil
 
-	}else{
+	} else {
 		// from read.go
 		if fh.noSeek {
 			return 0, ESPIPE
@@ -800,7 +801,7 @@ func (fh *RWFileHandle) Seek(offset int64, whence int) (ret int64, err error) {
 		// we don't check the offset - the next Read will
 		return fh.roffset, nil
 	}
-	
+
 }
 
 // _writeAt bytes to the file at off

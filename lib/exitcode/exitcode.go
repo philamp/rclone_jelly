@@ -4,10 +4,10 @@ package exitcode
 const (
 	// Success is returned when rclone finished without error.
 	Success = iota
-	// UsageError is returned when there was a syntax or usage error in the arguments.
-	UsageError
 	// UncategorizedError is returned for any error not categorised otherwise.
 	UncategorizedError
+	// UsageError is returned when there was a syntax or usage error in the arguments.
+	UsageError
 	// DirNotFound is returned when a source or destination directory is not found.
 	DirNotFound
 	// FileNotFound is returned when a source or destination file is not found.
@@ -22,4 +22,6 @@ const (
 	TransferExceeded
 	// NoFilesTransferred everything succeeded, but no transfer was made.
 	NoFilesTransferred
+	// DurationExceeded is returned when transfer duration exceeded the quota.
+	DurationExceeded
 )

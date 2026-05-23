@@ -29,8 +29,11 @@ func TestETA(t *testing.T) {
 		{size: 0, total: 15 * 86400, rate: 1.0, wantETA: 15 * 86400 * time.Second, wantOK: true, wantString: "2w1d"},
 		// Composite Custom String Cases
 		{size: 0, total: 1.5 * 86400, rate: 1.0, wantETA: 1.5 * 86400 * time.Second, wantOK: true, wantString: "1d12h"},
-		{size: 0, total: 95000, rate: 1.0, wantETA: 95000 * time.Second, wantOK: true, wantString: "1d2h23m20s"},
+		{size: 0, total: 95000, rate: 1.0, wantETA: 95000 * time.Second, wantOK: true, wantString: "1d2h23m"}, // Short format, if full it would be "1d2h23m20s"
 		// Standard Duration String Cases
+		{size: 0, total: 1, rate: 2.0, wantETA: 0, wantOK: true, wantString: "0s"},
+		{size: 0, total: 1, rate: 1.0, wantETA: time.Second, wantOK: true, wantString: "1s"},
+		{size: 0, total: 1, rate: 0.5, wantETA: 2 * time.Second, wantOK: true, wantString: "2s"},
 		{size: 0, total: 100, rate: 1.0, wantETA: 100 * time.Second, wantOK: true, wantString: "1m40s"},
 		{size: 50, total: 100, rate: 1.0, wantETA: 50 * time.Second, wantOK: true, wantString: "50s"},
 		{size: 100, total: 100, rate: 1.0, wantETA: 0 * time.Second, wantOK: true, wantString: "0s"},
@@ -41,10 +44,15 @@ func TestETA(t *testing.T) {
 		{size: 10, total: 20, rate: 0.0, wantETA: 0, wantOK: false, wantString: "-"},
 		{size: 10, total: 20, rate: -1.0, wantETA: 0, wantOK: false, wantString: "-"},
 		{size: 0, total: 0, rate: 1.0, wantETA: 0, wantOK: false, wantString: "-"},
+		// Extreme Cases
+		{size: 0, total: (1 << 63) - 1, rate: 1.0, wantETA: (time.Duration((1<<63)-1) / time.Second) * time.Second, wantOK: true, wantString: "-"},
+		{size: 0, total: ((1 << 63) - 1) / int64(time.Second), rate: 1.0, wantETA: (time.Duration((1<<63)-1) / time.Second) * time.Second, wantOK: true, wantString: "-"},
+		{size: 0, total: ((1<<63)-1)/int64(time.Second) - 1, rate: 1.0, wantETA: (time.Duration((1<<63)-1)/time.Second - 1) * time.Second, wantOK: true, wantString: "292y24w3d"}, // Short format, if full it would be "292y24w3d23h47m15s"
+		{size: 0, total: ((1<<63)-1)/int64(time.Second) - 1, rate: 0.1, wantETA: (time.Duration((1<<63)-1) / time.Second) * time.Second, wantOK: true, wantString: "-"},
 	} {
 		t.Run(fmt.Sprintf("size=%d/total=%d/rate=%f", test.size, test.total, test.rate), func(t *testing.T) {
 			gotETA, gotOK := eta(test.size, test.total, test.rate)
-			assert.Equal(t, test.wantETA, gotETA)
+			assert.Equal(t, int64(test.wantETA), int64(gotETA))
 			assert.Equal(t, test.wantOK, gotOK)
 			gotString := etaString(test.size, test.total, test.rate)
 			assert.Equal(t, test.wantString, gotString)
@@ -149,7 +157,7 @@ func TestStatsTotalDuration(t *testing.T) {
 		s.AddTransfer(tr1)
 
 		s.mu.Lock()
-		total := s.totalDuration()
+		total := s._totalDuration()
 		s.mu.Unlock()
 
 		assert.Equal(t, 1, len(s.startedTransfers))
@@ -167,7 +175,7 @@ func TestStatsTotalDuration(t *testing.T) {
 		s.AddTransfer(tr1)
 
 		s.mu.Lock()
-		total := s.totalDuration()
+		total := s._totalDuration()
 		s.mu.Unlock()
 
 		assert.Equal(t, time.Since(time1)/time.Second, total/time.Second)
@@ -205,7 +213,7 @@ func TestStatsTotalDuration(t *testing.T) {
 		time.Sleep(time.Millisecond)
 
 		s.mu.Lock()
-		total := s.totalDuration()
+		total := s._totalDuration()
 		s.mu.Unlock()
 
 		assert.Equal(t, time.Duration(30), total/time.Second)
@@ -236,10 +244,32 @@ func TestStatsTotalDuration(t *testing.T) {
 		})
 
 		s.mu.Lock()
-		total := s.totalDuration()
+		total := s._totalDuration()
 		s.mu.Unlock()
 
 		assert.Equal(t, startTime.Sub(time1)/time.Second, total/time.Second)
+	})
+}
+
+func TestRemoteStats(t *testing.T) {
+	ctx := context.Background()
+	startTime := time.Now()
+	time1 := startTime.Add(-40 * time.Second)
+	time2 := time1.Add(10 * time.Second)
+
+	t.Run("Single completed transfer", func(t *testing.T) {
+		s := NewStats(ctx)
+		tr1 := &Transfer{
+			startedAt:   time1,
+			completedAt: time2,
+		}
+		s.AddTransfer(tr1)
+		time.Sleep(time.Millisecond)
+		rs, err := s.RemoteStats(false)
+
+		require.NoError(t, err)
+		assert.Equal(t, float64(10), rs["transferTime"])
+		assert.Greater(t, rs["elapsedTime"], float64(0))
 	})
 }
 
@@ -419,19 +449,43 @@ func TestPruneTransfers(t *testing.T) {
 			}
 
 			s.mu.Lock()
-			assert.Equal(t, time.Duration(test.Transfers)*time.Second, s.totalDuration())
+			assert.Equal(t, time.Duration(test.Transfers)*time.Second, s._totalDuration())
 			assert.Equal(t, test.Transfers, len(s.startedTransfers))
 			s.mu.Unlock()
 
-			for i := 0; i < test.Transfers; i++ {
+			for range test.Transfers {
 				s.PruneTransfers()
 			}
 
 			s.mu.Lock()
-			assert.Equal(t, time.Duration(test.Transfers)*time.Second, s.totalDuration())
+			assert.Equal(t, time.Duration(test.Transfers)*time.Second, s._totalDuration())
 			assert.Equal(t, test.ExpectedStartedTransfers, len(s.startedTransfers))
 			s.mu.Unlock()
 
 		})
 	}
+}
+
+func TestRemoveDoneTransfers(t *testing.T) {
+	ctx := context.Background()
+	s := NewStats(ctx)
+	const transfers = 10
+	for i := int64(1); i <= int64(transfers); i++ {
+		s.AddTransfer(&Transfer{
+			startedAt:   time.Unix(i, 0),
+			completedAt: time.Unix(i+1, 0),
+		})
+	}
+
+	s.mu.Lock()
+	assert.Equal(t, time.Duration(transfers)*time.Second, s._totalDuration())
+	assert.Equal(t, transfers, len(s.startedTransfers))
+	s.mu.Unlock()
+
+	s.RemoveDoneTransfers()
+
+	s.mu.Lock()
+	assert.Equal(t, time.Duration(transfers)*time.Second, s._totalDuration())
+	assert.Equal(t, transfers, len(s.startedTransfers))
+	s.mu.Unlock()
 }

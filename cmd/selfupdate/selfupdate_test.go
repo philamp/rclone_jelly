@@ -1,11 +1,9 @@
 //go:build !noselfupdate
-// +build !noselfupdate
 
 package selfupdate
 
 import (
 	"context"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,10 +13,10 @@ import (
 	"time"
 
 	"github.com/rclone/rclone/fs"
+	_ "github.com/rclone/rclone/fstest" // needed to run under integration tests
 	"github.com/rclone/rclone/fstest/testy"
-	"github.com/rclone/rclone/lib/file"
-	"github.com/rclone/rclone/lib/random"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetVersion(t *testing.T) {
@@ -47,20 +45,6 @@ func TestGetVersion(t *testing.T) {
 	assert.Equal(t, "v1.52.3", resultVer)
 }
 
-func makeTestDir() (testDir string, err error) {
-	const maxAttempts = 5
-	testDirBase := filepath.Join(os.TempDir(), "rclone-test-selfupdate.")
-
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		testDir = testDirBase + random.String(4)
-		err = file.MkdirAll(testDir, os.ModePerm)
-		if err == nil {
-			break
-		}
-	}
-	return
-}
-
 func TestInstallOnLinux(t *testing.T) {
 	testy.SkipUnreliable(t)
 	if runtime.GOOS != "linux" {
@@ -69,13 +53,8 @@ func TestInstallOnLinux(t *testing.T) {
 
 	// Prepare for test
 	ctx := context.Background()
-	testDir, err := makeTestDir()
-	assert.NoError(t, err)
+	testDir := t.TempDir()
 	path := filepath.Join(testDir, "rclone")
-	defer func() {
-		_ = os.Chmod(path, 0644)
-		_ = os.RemoveAll(testDir)
-	}()
 
 	regexVer := regexp.MustCompile(`v[0-9]\S+`)
 
@@ -86,22 +65,25 @@ func TestInstallOnLinux(t *testing.T) {
 	assert.NoError(t, InstallUpdate(ctx, &Options{Beta: true, Output: path, Version: fs.Version}))
 
 	// Must fail on non-writable file
-	assert.NoError(t, ioutil.WriteFile(path, []byte("test"), 0644))
+	assert.NoError(t, os.WriteFile(path, []byte("test"), 0644))
 	assert.NoError(t, os.Chmod(path, 0000))
+	defer func() {
+		_ = os.Chmod(path, 0644)
+	}()
 	err = (InstallUpdate(ctx, &Options{Beta: true, Output: path}))
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "run self-update as root")
 
 	// Must keep non-standard permissions
 	assert.NoError(t, os.Chmod(path, 0644))
-	assert.NoError(t, InstallUpdate(ctx, &Options{Beta: true, Output: path}))
+	require.NoError(t, InstallUpdate(ctx, &Options{Beta: true, Output: path}))
 
 	info, err := os.Stat(path)
 	assert.NoError(t, err)
 	assert.Equal(t, os.FileMode(0644), info.Mode().Perm())
 
 	// Must remove temporary files
-	files, err := ioutil.ReadDir(testDir)
+	files, err := os.ReadDir(testDir)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(files))
 
@@ -123,11 +105,7 @@ func TestRenameOnWindows(t *testing.T) {
 	// Prepare for test
 	ctx := context.Background()
 
-	testDir, err := makeTestDir()
-	assert.NoError(t, err)
-	defer func() {
-		_ = os.RemoveAll(testDir)
-	}()
+	testDir := t.TempDir()
 
 	path := filepath.Join(testDir, "rclone.exe")
 	regexVer := regexp.MustCompile(`v[0-9]\S+`)
@@ -141,7 +119,7 @@ func TestRenameOnWindows(t *testing.T) {
 	// Must not create temporary files when target doesn't exist
 	assert.NoError(t, InstallUpdate(ctx, &Options{Beta: true, Output: path}))
 
-	files, err := ioutil.ReadDir(testDir)
+	files, err := os.ReadDir(testDir)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(files))
 
@@ -152,7 +130,7 @@ func TestRenameOnWindows(t *testing.T) {
 	assert.NoError(t, cmdWait.Start())
 
 	assert.NoError(t, InstallUpdate(ctx, &Options{Beta: false, Output: path}))
-	files, err = ioutil.ReadDir(testDir)
+	files, err = os.ReadDir(testDir)
 	assert.NoError(t, err)
 	assert.Equal(t, 2, len(files))
 
@@ -189,7 +167,7 @@ func TestRenameOnWindows(t *testing.T) {
 
 	// Updating when the "old" executable is running must produce a random "old" file
 	assert.NoError(t, InstallUpdate(ctx, &Options{Beta: true, Output: path}))
-	files, err = ioutil.ReadDir(testDir)
+	files, err = os.ReadDir(testDir)
 	assert.NoError(t, err)
 	assert.Equal(t, 3, len(files))
 

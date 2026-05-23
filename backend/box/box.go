@@ -17,9 +17,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/golang-jwt/jwt/v4"
 	"github.com/rclone/rclone/backend/box/api"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
@@ -36,16 +37,16 @@ import (
 	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fs/list"
 	"github.com/rclone/rclone/lib/dircache"
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/env"
 	"github.com/rclone/rclone/lib/jwtutil"
 	"github.com/rclone/rclone/lib/oauthutil"
 	"github.com/rclone/rclone/lib/pacer"
+	"github.com/rclone/rclone/lib/random"
 	"github.com/rclone/rclone/lib/rest"
 	"github.com/youmark/pkcs8"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/jws"
 )
 
 const (
@@ -64,17 +65,20 @@ const (
 // Globals
 var (
 	// Description of how to auth for this app
-	oauthConfig = &oauth2.Config{
-		Scopes: nil,
-		Endpoint: oauth2.Endpoint{
-			AuthURL:  "https://app.box.com/api/oauth2/authorize",
-			TokenURL: "https://app.box.com/api/oauth2/token",
-		},
+	oauthConfig = &oauthutil.Config{
+		Scopes:       nil,
+		AuthURL:      "https://app.box.com/api/oauth2/authorize",
+		TokenURL:     "https://app.box.com/api/oauth2/token",
 		ClientID:     rcloneClientID,
 		ClientSecret: obscure.MustReveal(rcloneEncryptedClientSecret),
 		RedirectURL:  oauthutil.RedirectURL,
 	}
 )
+
+type boxCustomClaims struct {
+	jwt.StandardClaims
+	BoxSubType string `json:"box_sub_type,omitempty"`
+}
 
 // Register with Fs
 func init() {
@@ -83,13 +87,11 @@ func init() {
 		Description: "Box",
 		NewFs:       NewFs,
 		Config: func(ctx context.Context, name string, m configmap.Mapper, config fs.ConfigIn) (*fs.ConfigOut, error) {
-			jsonFile, ok := m.Get("box_config_file")
-			boxSubType, boxSubTypeOk := m.Get("box_sub_type")
 			boxAccessToken, boxAccessTokenOk := m.Get("access_token")
 			var err error
 			// If using box config.json, use JWT auth
-			if ok && boxSubTypeOk && jsonFile != "" && boxSubType != "" {
-				err = refreshJWTToken(ctx, jsonFile, boxSubType, name, m)
+			if usesJWTAuth(m) {
+				err = refreshJWTToken(ctx, name, m)
 				if err != nil {
 					return nil, fmt.Errorf("failed to configure token with jwt authentication: %w", err)
 				}
@@ -102,16 +104,23 @@ func init() {
 			return nil, nil
 		},
 		Options: append(oauthutil.SharedOptions, []fs.Option{{
-			Name:     "root_folder_id",
-			Help:     "Fill in for rclone to use a non root folder as its starting point.",
-			Default:  "0",
-			Advanced: true,
+			Name:      "root_folder_id",
+			Help:      "Fill in for rclone to use a non root folder as its starting point.",
+			Default:   "0",
+			Advanced:  true,
+			Sensitive: true,
 		}, {
 			Name: "box_config_file",
 			Help: "Box App config.json location\n\nLeave blank normally." + env.ShellExpandHelp,
 		}, {
-			Name: "access_token",
-			Help: "Box App Primary Access Token\n\nLeave blank normally.",
+			Name:      "config_credentials",
+			Help:      "Box App config.json contents.\n\nLeave blank normally.",
+			Hide:      fs.OptionHideBoth,
+			Sensitive: true,
+		}, {
+			Name:      "access_token",
+			Help:      "Box App Primary Access Token\n\nLeave blank normally.",
+			Sensitive: true,
 		}, {
 			Name:    "box_sub_type",
 			Default: "user",
@@ -143,6 +152,23 @@ func init() {
 			Help:     "Only show items owned by the login (email address) passed in.",
 			Advanced: true,
 		}, {
+			Name:    "impersonate",
+			Default: "",
+			Help: `Impersonate this user ID when using a service account.
+
+Setting this flag allows rclone, when using a JWT service account, to
+act on behalf of another user by setting the as-user header.
+
+The user ID is the Box identifier for a user. User IDs can found for
+any user via the GET /users endpoint, which is only available to
+admins, or by calling the GET /users/me endpoint with an authenticated
+user session.
+
+See: https://developer.box.com/guides/authentication/jwt/as-user/
+`,
+			Advanced:  true,
+			Sensitive: true,
+		}, {
 			Name:     config.ConfigEncoding,
 			Help:     config.ConfigEncodingHelp,
 			Advanced: true,
@@ -161,9 +187,17 @@ func init() {
 	})
 }
 
-func refreshJWTToken(ctx context.Context, jsonFile string, boxSubType string, name string, m configmap.Mapper) error {
-	jsonFile = env.ShellExpand(jsonFile)
-	boxConfig, err := getBoxConfig(jsonFile)
+func usesJWTAuth(m configmap.Mapper) bool {
+	jsonFile, okFile := m.Get("box_config_file")
+	jsonFileCredentials, okCredentials := m.Get("config_credentials")
+	boxSubType, boxSubTypeOk := m.Get("box_sub_type")
+	return (okFile || okCredentials) && boxSubTypeOk && (jsonFile != "" || jsonFileCredentials != "") && boxSubType != ""
+}
+
+func refreshJWTToken(ctx context.Context, name string, m configmap.Mapper) error {
+	boxSubType, _ := m.Get("box_sub_type")
+
+	boxConfig, err := getBoxConfig(m)
 	if err != nil {
 		return fmt.Errorf("get box config: %w", err)
 	}
@@ -178,50 +212,54 @@ func refreshJWTToken(ctx context.Context, jsonFile string, boxSubType string, na
 	signingHeaders := getSigningHeaders(boxConfig)
 	queryParams := getQueryParams(boxConfig)
 	client := fshttp.NewClient(ctx)
-	err = jwtutil.Config("box", name, claims, signingHeaders, queryParams, privateKey, m, client)
+	err = jwtutil.Config("box", name, tokenURL, *claims, signingHeaders, queryParams, privateKey, m, client)
 	return err
 }
 
-func getBoxConfig(configFile string) (boxConfig *api.ConfigJSON, err error) {
-	file, err := ioutil.ReadFile(configFile)
-	if err != nil {
-		return nil, fmt.Errorf("box: failed to read Box config: %w", err)
+func getBoxConfig(m configmap.Mapper) (boxConfig *api.ConfigJSON, err error) {
+	configFileCredentials, _ := m.Get("config_credentials")
+	configFileBytes := []byte(configFileCredentials)
+
+	if configFileCredentials == "" {
+		configFile, _ := m.Get("box_config_file")
+		configFileBytes, err = os.ReadFile(configFile)
+		if err != nil {
+			return nil, fmt.Errorf("box: failed to read Box config: %w", err)
+		}
 	}
-	err = json.Unmarshal(file, &boxConfig)
+
+	err = json.Unmarshal(configFileBytes, &boxConfig)
 	if err != nil {
 		return nil, fmt.Errorf("box: failed to parse Box config: %w", err)
 	}
 	return boxConfig, nil
 }
 
-func getClaims(boxConfig *api.ConfigJSON, boxSubType string) (claims *jws.ClaimSet, err error) {
+func getClaims(boxConfig *api.ConfigJSON, boxSubType string) (claims *boxCustomClaims, err error) {
 	val, err := jwtutil.RandomHex(20)
 	if err != nil {
 		return nil, fmt.Errorf("box: failed to generate random string for jti: %w", err)
 	}
 
-	claims = &jws.ClaimSet{
-		Iss: boxConfig.BoxAppSettings.ClientID,
-		Sub: boxConfig.EnterpriseID,
-		Aud: tokenURL,
-		Exp: time.Now().Add(time.Second * 45).Unix(),
-		PrivateClaims: map[string]interface{}{
-			"box_sub_type": boxSubType,
-			"aud":          tokenURL,
-			"jti":          val,
+	claims = &boxCustomClaims{
+		//lint:ignore SA1019 since we need to use jwt.StandardClaims even if deprecated in jwt-go v4 until a more permanent solution is ready in time before jwt-go v5 where it is removed entirely
+		//nolint:staticcheck // Don't include staticcheck when running golangci-lint to avoid SA1019
+		StandardClaims: jwt.StandardClaims{
+			Id:        val,
+			Issuer:    boxConfig.BoxAppSettings.ClientID,
+			Subject:   boxConfig.EnterpriseID,
+			Audience:  tokenURL,
+			ExpiresAt: time.Now().Add(time.Second * 45).Unix(),
 		},
+		BoxSubType: boxSubType,
 	}
-
 	return claims, nil
 }
 
-func getSigningHeaders(boxConfig *api.ConfigJSON) *jws.Header {
-	signingHeaders := &jws.Header{
-		Algorithm: "RS256",
-		Typ:       "JWT",
-		KeyID:     boxConfig.BoxAppSettings.AppAuth.PublicKeyID,
+func getSigningHeaders(boxConfig *api.ConfigJSON) map[string]any {
+	signingHeaders := map[string]any{
+		"kid": boxConfig.BoxAppSettings.AppAuth.PublicKeyID,
 	}
-
 	return signingHeaders
 }
 
@@ -235,8 +273,10 @@ func getQueryParams(boxConfig *api.ConfigJSON) map[string]string {
 }
 
 func getDecryptedPrivateKey(boxConfig *api.ConfigJSON) (key *rsa.PrivateKey, err error) {
-
 	block, rest := pem.Decode([]byte(boxConfig.BoxAppSettings.AppAuth.PrivateKey))
+	if block == nil {
+		return nil, errors.New("box: failed to PEM decode private key")
+	}
 	if len(rest) > 0 {
 		return nil, fmt.Errorf("box: extra data included in private key: %w", err)
 	}
@@ -258,19 +298,29 @@ type Options struct {
 	AccessToken   string               `config:"access_token"`
 	ListChunk     int                  `config:"list_chunk"`
 	OwnedBy       string               `config:"owned_by"`
+	Impersonate   string               `config:"impersonate"`
+}
+
+// ItemMeta defines metadata we cache for each Item ID
+type ItemMeta struct {
+	SequenceID int64  // the most recent event processed for this item
+	ParentID   string // ID of the parent directory of this item
+	Name       string // leaf name of this item
 }
 
 // Fs represents a remote box
 type Fs struct {
-	name         string                // name of this remote
-	root         string                // the path we are working on
-	opt          Options               // parsed options
-	features     *fs.Features          // optional features
-	srv          *rest.Client          // the connection to the one drive server
-	dirCache     *dircache.DirCache    // Map of directory path to directory id
-	pacer        *fs.Pacer             // pacer for API calls
-	tokenRenewer *oauthutil.Renew      // renew the token on expiry
-	uploadToken  *pacer.TokenDispenser // control concurrency
+	name            string                // name of this remote
+	root            string                // the path we are working on
+	opt             Options               // parsed options
+	features        *fs.Features          // optional features
+	srv             *rest.Client          // the connection to the server
+	dirCache        *dircache.DirCache    // Map of directory path to directory id
+	pacer           *fs.Pacer             // pacer for API calls
+	tokenRenewer    *oauthutil.Renew      // renew the token on expiry
+	uploadToken     *pacer.TokenDispenser // control concurrency
+	itemMetaCacheMu *sync.Mutex           // protects itemMetaCache
+	itemMetaCache   map[string]ItemMeta   // map of Item ID to selected metadata
 }
 
 // Object describes a box object
@@ -349,7 +399,7 @@ func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, err
 
 // readMetaDataForPath reads the metadata from the path
 func (f *Fs) readMetaDataForPath(ctx context.Context, path string) (info *api.Item, err error) {
-	// defer fs.Trace(f, "path=%q", path)("info=%+v, err=%v", &info, &err)
+	// defer log.Trace(f, "path=%q", path)("info=%+v, err=%v", &info, &err)
 	leaf, directoryID, err := f.dirCache.FindPath(ctx, path, false)
 	if err != nil {
 		if err == fs.ErrorDirNotFound {
@@ -358,20 +408,30 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, path string) (info *api.It
 		return nil, err
 	}
 
-	found, err := f.listAll(ctx, directoryID, false, true, true, func(item *api.Item) bool {
-		if strings.EqualFold(item.Name, leaf) {
-			info = item
-			return true
-		}
-		return false
+	// Use preupload to find the ID
+	itemMini, err := f.preUploadCheck(ctx, leaf, directoryID, -1)
+	if err != nil {
+		return nil, err
+	}
+	if itemMini == nil {
+		return nil, fs.ErrorObjectNotFound
+	}
+
+	// Now we have the ID we can look up the object proper
+	opts := rest.Opts{
+		Method:     "GET",
+		Path:       "/files/" + itemMini.ID,
+		Parameters: fieldsValue(),
+	}
+	var item api.Item
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err := f.srv.CallJSON(ctx, &opts, nil, &item)
+		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
 		return nil, err
 	}
-	if !found {
-		return nil, fs.ErrorObjectNotFound
-	}
-	return info, nil
+	return &item, nil
 }
 
 // errorHandler parses a non 2xx error response into an error
@@ -418,12 +478,14 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 
 	ci := fs.GetConfig(ctx)
 	f := &Fs{
-		name:        name,
-		root:        root,
-		opt:         *opt,
-		srv:         rest.NewClient(client).SetRoot(rootURL),
-		pacer:       fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
-		uploadToken: pacer.NewTokenDispenser(ci.Transfers),
+		name:            name,
+		root:            root,
+		opt:             *opt,
+		srv:             rest.NewClient(client).SetRoot(rootURL),
+		pacer:           fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+		uploadToken:     pacer.NewTokenDispenser(ci.Transfers),
+		itemMetaCacheMu: new(sync.Mutex),
+		itemMetaCache:   make(map[string]ItemMeta),
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,
@@ -436,15 +498,17 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		f.srv.SetHeader("Authorization", "Bearer "+f.opt.AccessToken)
 	}
 
-	jsonFile, ok := m.Get("box_config_file")
-	boxSubType, boxSubTypeOk := m.Get("box_sub_type")
+	// If using impersonate set an as-user header
+	if f.opt.Impersonate != "" {
+		f.srv.SetHeader("as-user", f.opt.Impersonate)
+	}
 
 	if ts != nil {
 		// If using box config.json and JWT, renewing should just refresh the token and
 		// should do so whether there are uploads pending or not.
-		if ok && boxSubTypeOk && jsonFile != "" && boxSubType != "" {
+		if usesJWTAuth(m) {
 			f.tokenRenewer = oauthutil.NewRenew(f.String(), ts, func() error {
-				err := refreshJWTToken(ctx, jsonFile, boxSubType, name, m)
+				err := refreshJWTToken(ctx, name, m)
 				return err
 			})
 			f.tokenRenewer.Start()
@@ -571,7 +635,7 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		//fmt.Printf("...Error %v\n", err)
+		// fmt.Printf("...Error %v\n", err)
 		return "", err
 	}
 	// fmt.Printf("...Id %q\n", *info.Id)
@@ -657,9 +721,27 @@ OUTER:
 // This should return ErrDirNotFound if the directory isn't
 // found.
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
+	return list.WithListP(ctx, dir, f)
+}
+
+// ListP lists the objects and directories of the Fs starting
+// from dir non recursively into out.
+//
+// dir should be "" to start from the root, and should not
+// have trailing slashes.
+//
+// This should return ErrDirNotFound if the directory isn't
+// found.
+//
+// It should call callback for each tranche of entries read.
+// These need not be returned in any particular order.  If
+// callback returns an error then the listing will stop
+// immediately.
+func (f *Fs) ListP(ctx context.Context, dir string, callback fs.ListRCallback) error {
+	list := list.NewHelper(callback)
 	directoryID, err := f.dirCache.FindDir(ctx, dir, false)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	var iErr error
 	_, err = f.listAll(ctx, directoryID, false, false, true, func(info *api.Item) bool {
@@ -669,30 +751,49 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 			f.dirCache.Put(remote, info.ID)
 			d := fs.NewDir(remote, info.ModTime()).SetID(info.ID)
 			// FIXME more info from dir?
-			entries = append(entries, d)
+			err = list.Add(d)
+			if err != nil {
+				iErr = err
+				return true
+			}
 		} else if info.Type == api.ItemTypeFile {
 			o, err := f.newObjectWithInfo(ctx, remote, info)
 			if err != nil {
 				iErr = err
 				return true
 			}
-			entries = append(entries, o)
+			err = list.Add(o)
+			if err != nil {
+				iErr = err
+				return true
+			}
 		}
+
+		// Cache some metadata for this Item to help us process events later
+		// on. In particular, the box event API does not provide the old path
+		// of the Item when it is renamed/deleted/moved/etc.
+		f.itemMetaCacheMu.Lock()
+		cachedItemMeta, found := f.itemMetaCache[info.ID]
+		if !found || cachedItemMeta.SequenceID < info.SequenceID {
+			f.itemMetaCache[info.ID] = ItemMeta{SequenceID: info.SequenceID, ParentID: directoryID, Name: info.Name}
+		}
+		f.itemMetaCacheMu.Unlock()
+
 		return false
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if iErr != nil {
-		return nil, iErr
+		return iErr
 	}
-	return entries, nil
+	return list.Flush()
 }
 
 // Creates from the parameters passed in a half finished Object which
 // must have setMetaData called on it
 //
-// Returns the object, leaf, directoryID and error
+// Returns the object, leaf, directoryID and error.
 //
 // Used to create new objects
 func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time, size int64) (o *Object, leaf string, directoryID string, err error) {
@@ -713,7 +814,7 @@ func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time,
 //
 // It returns "", nil if the file is good to go
 // It returns "ID", nil if the file must be updated
-func (f *Fs) preUploadCheck(ctx context.Context, leaf, directoryID string, size int64) (ID string, err error) {
+func (f *Fs) preUploadCheck(ctx context.Context, leaf, directoryID string, size int64) (item *api.ItemMini, err error) {
 	check := api.PreUploadCheck{
 		Name: f.opt.Enc.FromStandardName(leaf),
 		Parent: api.Parent{
@@ -738,21 +839,21 @@ func (f *Fs) preUploadCheck(ctx context.Context, leaf, directoryID string, size 
 			var conflict api.PreUploadCheckConflict
 			err = json.Unmarshal(apiErr.ContextInfo, &conflict)
 			if err != nil {
-				return "", fmt.Errorf("pre-upload check: JSON decode failed: %w", err)
+				return nil, fmt.Errorf("pre-upload check: JSON decode failed: %w", err)
 			}
 			if conflict.Conflicts.Type != api.ItemTypeFile {
-				return "", fmt.Errorf("pre-upload check: can't overwrite non file with file: %w", err)
+				return nil, fs.ErrorIsDir
 			}
-			return conflict.Conflicts.ID, nil
+			return &conflict.Conflicts, nil
 		}
-		return "", fmt.Errorf("pre-upload check: %w", err)
+		return nil, fmt.Errorf("pre-upload check: %w", err)
 	}
-	return "", nil
+	return nil, nil
 }
 
 // Put the object
 //
-// Copy the reader in to the new object which is returned
+// Copy the reader in to the new object which is returned.
 //
 // The new object may have been created if an error is returned
 func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
@@ -768,11 +869,11 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 
 	// Preflight check the upload, which returns the ID if the
 	// object already exists
-	ID, err := f.preUploadCheck(ctx, leaf, directoryID, src.Size())
+	item, err := f.preUploadCheck(ctx, leaf, directoryID, src.Size())
 	if err != nil {
 		return nil, err
 	}
-	if ID == "" {
+	if item == nil {
 		return f.PutUnchecked(ctx, in, src, options...)
 	}
 
@@ -780,7 +881,7 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	o := &Object{
 		fs:     f,
 		remote: remote,
-		id:     ID,
+		id:     item.ID,
 	}
 	return o, o.Update(ctx, in, src, options...)
 }
@@ -792,9 +893,9 @@ func (f *Fs) PutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, opt
 
 // PutUnchecked the object into the container
 //
-// This will produce an error if the object already exists
+// This will produce an error if the object already exists.
 //
-// Copy the reader in to the new object which is returned
+// Copy the reader in to the new object which is returned.
 //
 // The new object may have been created if an error is returned
 func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
@@ -877,9 +978,9 @@ func (f *Fs) Precision() time.Duration {
 
 // Copy src to this remote using server-side copy operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -897,7 +998,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 
 	srcPath := srcObj.fs.rootSlash() + srcObj.remote
 	dstPath := f.rootSlash() + remote
-	if strings.ToLower(srcPath) == strings.ToLower(dstPath) {
+	if strings.EqualFold(srcPath, dstPath) {
 		return nil, fmt.Errorf("can't copy %q -> %q as are same name when lowercase", srcPath, dstPath)
 	}
 
@@ -905,6 +1006,26 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	dstObj, leaf, directoryID, err := f.createObject(ctx, remote, srcObj.modTime, srcObj.size)
 	if err != nil {
 		return nil, err
+	}
+
+	// check if dest already exists
+	item, err := f.preUploadCheck(ctx, leaf, directoryID, src.Size())
+	if err != nil {
+		return nil, err
+	}
+	if item != nil { // dest already exists, need to copy to temp name and then move
+		tempSuffix := "-rclone-copy-" + random.String(8)
+		fs.Debugf(remote, "dst already exists, copying to temp name %v", remote+tempSuffix)
+		tempObj, err := f.Copy(ctx, src, remote+tempSuffix)
+		if err != nil {
+			return nil, err
+		}
+		fs.Debugf(remote+tempSuffix, "moving to real name %v", remote)
+		err = f.deleteObject(ctx, item.ID)
+		if err != nil {
+			return nil, err
+		}
+		return f.Move(ctx, tempObj, remote)
 	}
 
 	// Copy the object
@@ -995,9 +1116,9 @@ func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
 
 // Move src to this remote using server-side move operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -1117,7 +1238,7 @@ func (f *Fs) deletePermanently(ctx context.Context, itemType, id string) error {
 // CleanUp empties the trash
 func (f *Fs) CleanUp(ctx context.Context) (err error) {
 	var (
-		deleteErrors       = int64(0)
+		deleteErrors       atomic.Uint64
 		concurrencyControl = make(chan struct{}, fs.GetConfig(ctx).Checkers)
 		wg                 sync.WaitGroup
 	)
@@ -1133,7 +1254,7 @@ func (f *Fs) CleanUp(ctx context.Context) (err error) {
 				err := f.deletePermanently(ctx, item.Type, item.ID)
 				if err != nil {
 					fs.Errorf(f, "failed to delete trash item %q (%q): %v", item.Name, item.ID, err)
-					atomic.AddInt64(&deleteErrors, 1)
+					deleteErrors.Add(1)
 				}
 			}()
 		} else {
@@ -1142,10 +1263,277 @@ func (f *Fs) CleanUp(ctx context.Context) (err error) {
 		return false
 	})
 	wg.Wait()
-	if deleteErrors != 0 {
-		return fmt.Errorf("failed to delete %d trash items", deleteErrors)
+	if deleteErrors.Load() != 0 {
+		return fmt.Errorf("failed to delete %d trash items", deleteErrors.Load())
 	}
 	return err
+}
+
+// Shutdown shutdown the fs
+func (f *Fs) Shutdown(ctx context.Context) error {
+	f.tokenRenewer.Shutdown()
+	return nil
+}
+
+// ChangeNotify calls the passed function with a path that has had changes.
+// If the implementation uses polling, it should adhere to the given interval.
+//
+// Automatically restarts itself in case of unexpected behavior of the remote.
+//
+// Close the returned channel to stop being notified.
+func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
+	go func() {
+		// get the `stream_position` early so all changes from now on get processed
+		streamPosition, err := f.changeNotifyStreamPosition(ctx)
+		if err != nil {
+			fs.Infof(f, "Failed to get StreamPosition: %s", err)
+		}
+
+		// box can send duplicate Event IDs. Use this map to track and filter
+		// the ones we've already processed.
+		processedEventIDs := make(map[string]time.Time)
+
+		var ticker *time.Ticker
+		var tickerC <-chan time.Time
+		for {
+			select {
+			case pollInterval, ok := <-pollIntervalChan:
+				if !ok {
+					if ticker != nil {
+						ticker.Stop()
+					}
+					return
+				}
+				if ticker != nil {
+					ticker.Stop()
+					ticker, tickerC = nil, nil
+				}
+				if pollInterval != 0 {
+					ticker = time.NewTicker(pollInterval)
+					tickerC = ticker.C
+				}
+			case <-tickerC:
+				if streamPosition == "" {
+					streamPosition, err = f.changeNotifyStreamPosition(ctx)
+					if err != nil {
+						fs.Infof(f, "Failed to get StreamPosition: %s", err)
+						continue
+					}
+				}
+
+				// Garbage collect EventIDs older than 1 minute
+				for eventID, timestamp := range processedEventIDs {
+					if time.Since(timestamp) > time.Minute {
+						delete(processedEventIDs, eventID)
+					}
+				}
+
+				streamPosition, err = f.changeNotifyRunner(ctx, notifyFunc, streamPosition, processedEventIDs)
+				if err != nil {
+					fs.Infof(f, "Change notify listener failure: %s", err)
+				}
+			}
+		}
+	}()
+}
+
+func (f *Fs) changeNotifyStreamPosition(ctx context.Context) (streamPosition string, err error) {
+	opts := rest.Opts{
+		Method:     "GET",
+		Path:       "/events",
+		Parameters: fieldsValue(),
+	}
+	opts.Parameters.Set("stream_position", "now")
+	opts.Parameters.Set("stream_type", "changes")
+
+	var result api.Events
+	var resp *http.Response
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return strconv.FormatInt(result.NextStreamPosition, 10), nil
+}
+
+// Attempts to construct the full path for an object, given the ID of its
+// parent directory and the name of the object.
+//
+// Can return "" if the parentID is not currently in the directory cache.
+func (f *Fs) getFullPath(parentID string, childName string) (fullPath string) {
+	fullPath = ""
+	name := f.opt.Enc.ToStandardName(childName)
+	if parentID != "" {
+		if parentDir, ok := f.dirCache.GetInv(parentID); ok {
+			if len(parentDir) > 0 {
+				fullPath = parentDir + "/" + name
+			} else {
+				fullPath = name
+			}
+		}
+	} else {
+		// No parent, this object is at the root
+		fullPath = name
+	}
+	return fullPath
+}
+
+func (f *Fs) changeNotifyRunner(ctx context.Context, notifyFunc func(string, fs.EntryType), streamPosition string, processedEventIDs map[string]time.Time) (nextStreamPosition string, err error) {
+	nextStreamPosition = streamPosition
+
+	for {
+		// box only allows a max of 500 events
+		limit := min(f.opt.ListChunk, 500)
+
+		opts := rest.Opts{
+			Method:     "GET",
+			Path:       "/events",
+			Parameters: fieldsValue(),
+		}
+		opts.Parameters.Set("stream_position", nextStreamPosition)
+		opts.Parameters.Set("stream_type", "changes")
+		opts.Parameters.Set("limit", strconv.Itoa(limit))
+
+		var result api.Events
+		var resp *http.Response
+		fs.Debugf(f, "Checking for changes on remote (next_stream_position: %q)", nextStreamPosition)
+		err = f.pacer.Call(func() (bool, error) {
+			resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
+			return shouldRetry(ctx, resp, err)
+		})
+		if err != nil {
+			return "", err
+		}
+
+		if result.ChunkSize != int64(len(result.Entries)) {
+			return "", fmt.Errorf("invalid response to event request, chunk_size (%v) not equal to number of entries (%v)", result.ChunkSize, len(result.Entries))
+		}
+
+		nextStreamPosition = strconv.FormatInt(result.NextStreamPosition, 10)
+		if result.ChunkSize == 0 {
+			return nextStreamPosition, nil
+		}
+
+		type pathToClear struct {
+			path      string
+			entryType fs.EntryType
+		}
+		var pathsToClear []pathToClear
+		newEventIDs := 0
+		for _, entry := range result.Entries {
+			eventDetails := fmt.Sprintf("[%q(%d)|%s|%s|%s|%s]", entry.Source.Name, entry.Source.SequenceID,
+				entry.Source.Type, entry.EventType, entry.Source.ID, entry.EventID)
+
+			if entry.EventID == "" {
+				fs.Debugf(f, "%s ignored due to missing EventID", eventDetails)
+				continue
+			}
+			if _, ok := processedEventIDs[entry.EventID]; ok {
+				fs.Debugf(f, "%s ignored due to duplicate EventID", eventDetails)
+				continue
+			}
+			processedEventIDs[entry.EventID] = time.Now()
+			newEventIDs++
+
+			if entry.Source.ID == "" { // missing File or Folder ID
+				fs.Debugf(f, "%s ignored due to missing SourceID", eventDetails)
+				continue
+			}
+			if entry.Source.Type != api.ItemTypeFile && entry.Source.Type != api.ItemTypeFolder { // event is not for a file or folder
+				fs.Debugf(f, "%s ignored due to unsupported SourceType", eventDetails)
+				continue
+			}
+
+			// Only interested in event types that result in a file tree change
+			if _, found := api.FileTreeChangeEventTypes[entry.EventType]; !found {
+				fs.Debugf(f, "%s ignored due to unsupported EventType", eventDetails)
+				continue
+			}
+
+			f.itemMetaCacheMu.Lock()
+			itemMeta, cachedItemMetaFound := f.itemMetaCache[entry.Source.ID]
+			if cachedItemMetaFound {
+				if itemMeta.SequenceID >= entry.Source.SequenceID {
+					// Item in the cache has the same or newer SequenceID than
+					// this event. Ignore this event, it must be old.
+					f.itemMetaCacheMu.Unlock()
+					fs.Debugf(f, "%s ignored due to old SequenceID (%q)", eventDetails, itemMeta.SequenceID)
+					continue
+				}
+
+				// This event is newer. Delete its entry from the cache,
+				// we'll notify about its change below, then it's up to a
+				// future list operation to repopulate the cache.
+				delete(f.itemMetaCache, entry.Source.ID)
+			}
+			f.itemMetaCacheMu.Unlock()
+
+			entryType := fs.EntryDirectory
+			if entry.Source.Type == api.ItemTypeFile {
+				entryType = fs.EntryObject
+			}
+
+			// The box event only includes the new path for the object (e.g.
+			// the path after the object was moved). If there was an old path
+			// saved in our cache, it must be cleared.
+			if cachedItemMetaFound {
+				path := f.getFullPath(itemMeta.ParentID, itemMeta.Name)
+				if path != "" {
+					fs.Debugf(f, "%s added old path (%q) for notify", eventDetails, path)
+					pathsToClear = append(pathsToClear, pathToClear{path: path, entryType: entryType})
+				} else {
+					fs.Debugf(f, "%s old parent not cached", eventDetails)
+				}
+
+				// If this is a directory, also delete it from the dir cache.
+				// This will effectively invalidate the item metadata cache
+				// entries for all descendents of this directory, since we
+				// will no longer be able to construct a full path for them.
+				// This is exactly what we want, since we don't want to notify
+				// on the paths of these descendents if one of their ancestors
+				// has been renamed/deleted.
+				if entry.Source.Type == api.ItemTypeFolder {
+					f.dirCache.FlushDir(path)
+				}
+			}
+
+			// If the item is "active", then it is not trashed or deleted, so
+			// it potentially has a valid parent.
+			//
+			// Construct the new path of the object, based on the Parent ID
+			// and its name. If we get an empty result, it means we don't
+			// currently know about this object so notification is unnecessary.
+			if entry.Source.ItemStatus == api.ItemStatusActive {
+				path := f.getFullPath(entry.Source.Parent.ID, entry.Source.Name)
+				if path != "" {
+					fs.Debugf(f, "%s added new path (%q) for notify", eventDetails, path)
+					pathsToClear = append(pathsToClear, pathToClear{path: path, entryType: entryType})
+				} else {
+					fs.Debugf(f, "%s new parent not found", eventDetails)
+				}
+			}
+		}
+
+		// box can sometimes repeatedly return the same Event IDs within a
+		// short period of time. If it stops giving us new ones, treat it
+		// the same as if it returned us none at all.
+		if newEventIDs == 0 {
+			return nextStreamPosition, nil
+		}
+
+		notifiedPaths := make(map[string]bool)
+		for _, p := range pathsToClear {
+			if _, ok := notifiedPaths[p.path]; ok {
+				continue
+			}
+			notifiedPaths[p.path] = true
+			notifyFunc(p.path, p.entryType)
+		}
+		fs.Debugf(f, "Received %v events, resulting in %v paths and %v notifications", len(result.Entries), len(pathsToClear), len(notifiedPaths))
+	}
 }
 
 // DirCacheFlush resets the directory cache - used in testing as an
@@ -1234,7 +1622,6 @@ func (o *Object) readMetaData(ctx context.Context) (err error) {
 }
 
 // ModTime returns the modification time of the object
-//
 //
 // It attempts to read the objects mtime and if that isn't present the
 // LastModified returned in the http headers
@@ -1346,9 +1733,9 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 
 // Update the object with the contents of the io.Reader, modTime and size
 //
-// If existing is set then it updates the object rather than creating a new one
+// If existing is set then it updates the object rather than creating a new one.
 //
-// The new object may have been created if an error is returned
+// The new object may have been created if an error is returned.
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
 	if o.fs.tokenRenewer != nil {
 		o.fs.tokenRenewer.Start()
@@ -1396,6 +1783,8 @@ var (
 	_ fs.DirCacheFlusher = (*Fs)(nil)
 	_ fs.PublicLinker    = (*Fs)(nil)
 	_ fs.CleanUpper      = (*Fs)(nil)
+	_ fs.ListPer         = (*Fs)(nil)
+	_ fs.Shutdowner      = (*Fs)(nil)
 	_ fs.Object          = (*Object)(nil)
 	_ fs.IDer            = (*Object)(nil)
 )

@@ -22,14 +22,12 @@ type logCalculator struct {
 // NewPacer creates a Pacer for the given Fs and Calculator.
 func NewPacer(ctx context.Context, c pacer.Calculator) *Pacer {
 	ci := GetConfig(ctx)
-	retries := ci.LowLevelRetries
-	if retries <= 0 {
-		retries = 1
-	}
+	retries := max(ci.LowLevelRetries, 1)
+	maxConnections := max(ci.MaxConnections, 0)
 	p := &Pacer{
 		Pacer: pacer.New(
 			pacer.InvokerOption(pacerInvoker),
-			pacer.MaxConnectionsOption(ci.Checkers+ci.Transfers),
+			pacer.MaxConnectionsOption(maxConnections),
 			pacer.RetriesOption(retries),
 			pacer.CalculatorOption(c),
 		),
@@ -73,7 +71,7 @@ func (p *Pacer) SetCalculator(c pacer.Calculator) {
 // ModifyCalculator calls the given function with the currently configured
 // Calculator and the Pacer lock held.
 func (p *Pacer) ModifyCalculator(f func(pacer.Calculator)) {
-	p.ModifyCalculator(func(c pacer.Calculator) {
+	p.Pacer.ModifyCalculator(func(c pacer.Calculator) {
 		switch _c := c.(type) {
 		case *logCalculator:
 			f(_c.Calculator)

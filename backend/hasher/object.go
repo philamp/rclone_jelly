@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"path"
 	"time"
 
@@ -72,7 +71,14 @@ func (o *Object) Hash(ctx context.Context, hashType hash.Type) (hashVal string, 
 	f := o.f
 	if f.passHashes.Contains(hashType) {
 		fs.Debugf(o, "pass %s", hashType)
-		return o.Object.Hash(ctx, hashType)
+		hashVal, err = o.Object.Hash(ctx, hashType)
+		if hashVal != "" {
+			return hashVal, err
+		}
+		if err != nil {
+			fs.Debugf(o, "error passing %s: %v", hashType, err)
+		}
+		fs.Debugf(o, "passed %s is blank -- trying other methods", hashType)
 	}
 	if !f.suppHashes.Contains(hashType) {
 		fs.Debugf(o, "unsupp %s", hashType)
@@ -118,7 +124,7 @@ func (o *Object) updateHashes(ctx context.Context) error {
 	defer func() {
 		_ = r.Close()
 	}()
-	if _, err = io.Copy(ioutil.Discard, r); err != nil {
+	if _, err = io.Copy(io.Discard, r); err != nil {
 		fs.Infof(o, "update failed (copy): %v", err)
 		return err
 	}

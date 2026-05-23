@@ -1,7 +1,6 @@
 // Upload object to QingStor
 
 //go:build !plan9 && !js
-// +build !plan9,!js
 
 package qingstor
 
@@ -184,7 +183,7 @@ func (u *uploader) upload() error {
 		fs.Debugf(u, "Uploading as single part object to QingStor")
 		return u.singlePartUpload(reader, u.readerPos)
 	} else if err != nil {
-		return fmt.Errorf("read upload data failed: %s", err)
+		return fmt.Errorf("read upload data failed: %w", err)
 	}
 
 	fs.Debugf(u, "Uploading as multi-part object to QingStor")
@@ -359,7 +358,7 @@ func (mu *multiUploader) multiPartUpload(firstBuf io.ReadSeeker) (err error) {
 	})()
 
 	ch := make(chan chunk, mu.cfg.concurrency)
-	for i := 0; i < mu.cfg.concurrency; i++ {
+	for range mu.cfg.concurrency {
 		mu.wg.Add(1)
 		go mu.readChunk(ch)
 	}

@@ -4,6 +4,7 @@ package fs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"time"
@@ -16,6 +17,8 @@ const (
 	ModTimeNotSupported = 100 * 365 * 24 * time.Hour
 	// MaxLevel is a sentinel representing an infinite depth for listings
 	MaxLevel = math.MaxInt32
+	// The suffix added to a translated symbolic link
+	LinkSuffix = ".rclonelink"
 )
 
 // Globals
@@ -40,7 +43,7 @@ var (
 	ErrorNotAFile                    = errors.New("is not a regular file")
 	ErrorNotDeleting                 = errors.New("not deleting files as there were IO errors")
 	ErrorNotDeletingDirs             = errors.New("not deleting directories as there were IO errors")
-	ErrorOverlapping                 = errors.New("can't sync or move files on overlapping remotes")
+	ErrorOverlapping                 = errors.New("can't sync or move files on overlapping remotes (try excluding the destination with a filter rule)")
 	ErrorDirectoryNotEmpty           = errors.New("directory not empty")
 	ErrorImmutableModified           = errors.New("immutable file modified")
 	ErrorPermissionDenied            = errors.New("permission denied")
@@ -48,7 +51,26 @@ var (
 	ErrorNotImplemented              = errors.New("optional feature not implemented")
 	ErrorCommandNotFound             = errors.New("command not found")
 	ErrorFileNameTooLong             = errors.New("file name too long")
+	ErrorCantListRoot                = errors.New("can't list root")
+	ErrorFileTooSmall                = errors.New("file too small for multipart upload")
 )
+
+// FileTooSmallError is returned by OpenChunkWriter when a file is below the
+// backend's minimum size for multipart uploads. It wraps ErrorFileTooSmall
+// and carries the minimum size so callers can retry with a larger file.
+type FileTooSmallError struct {
+	MinSize int64
+}
+
+// Error implements the error interface.
+func (e *FileTooSmallError) Error() string {
+	return fmt.Sprintf("file too small for multipart upload (minimum %d bytes)", e.MinSize)
+}
+
+// Unwrap returns ErrorFileTooSmall so errors.Is works.
+func (e *FileTooSmallError) Unwrap() error {
+	return ErrorFileTooSmall
+}
 
 // CheckClose is a utility function used to check the return from
 // Close in a defer statement.
@@ -75,7 +97,7 @@ func FileExists(ctx context.Context, fs Fs, remote string) (bool, error) {
 // GetModifyWindow calculates the maximum modify window between the given Fses
 // and the Config.ModifyWindow parameter.
 func GetModifyWindow(ctx context.Context, fss ...Info) time.Duration {
-	window := GetConfig(ctx).ModifyWindow
+	window := time.Duration(GetConfig(ctx).ModifyWindow)
 	for _, f := range fss {
 		if f != nil {
 			precision := f.Precision()

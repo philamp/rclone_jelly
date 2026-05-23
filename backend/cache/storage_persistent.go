@@ -1,5 +1,4 @@
 //go:build !plan9 && !js
-// +build !plan9,!js
 
 package cache
 
@@ -9,7 +8,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"strconv"
@@ -20,6 +18,7 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/walk"
 	bolt "go.etcd.io/bbolt"
+	"go.etcd.io/bbolt/errors"
 )
 
 // Constants
@@ -250,7 +249,7 @@ func (b *Persistent) GetDirEntries(cachedDir *Directory) (fs.DirEntries, error) 
 		if val != nil {
 			err := json.Unmarshal(val, cachedDir)
 			if err != nil {
-				return fmt.Errorf("error during unmarshalling obj: %v", err)
+				return fmt.Errorf("error during unmarshalling obj: %w", err)
 			}
 		} else {
 			return fmt.Errorf("missing cached dir: %v", cachedDir)
@@ -456,10 +455,7 @@ func (b *Persistent) HasEntry(remote string) bool {
 
 		return fmt.Errorf("couldn't find object (%v)", remote)
 	})
-	if err == nil {
-		return true
-	}
-	return false
+	return err == nil
 }
 
 // HasChunk confirms the existence of a single chunk of an object
@@ -476,7 +472,7 @@ func (b *Persistent) GetChunk(cachedObject *Object, offset int64) ([]byte, error
 	var data []byte
 
 	fp := path.Join(b.dataPath, cachedObject.abs(), strconv.FormatInt(offset, 10))
-	data, err := ioutil.ReadFile(fp)
+	data, err := os.ReadFile(fp)
 	if err != nil {
 		return nil, err
 	}
@@ -489,7 +485,7 @@ func (b *Persistent) AddChunk(fp string, data []byte, offset int64) error {
 	_ = os.MkdirAll(path.Join(b.dataPath, fp), os.ModePerm)
 
 	filePath := path.Join(b.dataPath, fp, strconv.FormatInt(offset, 10))
-	err := ioutil.WriteFile(filePath, data, os.ModePerm)
+	err := os.WriteFile(filePath, data, os.ModePerm)
 	if err != nil {
 		return err
 	}
@@ -554,7 +550,7 @@ func (b *Persistent) CleanChunksBySize(maxSize int64) {
 	err := b.db.Update(func(tx *bolt.Tx) error {
 		dataTsBucket := tx.Bucket([]byte(DataTsBucket))
 		if dataTsBucket == nil {
-			return fmt.Errorf("Couldn't open (%v) bucket", DataTsBucket)
+			return fmt.Errorf("couldn't open (%v) bucket", DataTsBucket)
 		}
 		// iterate through ts
 		c := dataTsBucket.Cursor()
@@ -602,7 +598,7 @@ func (b *Persistent) CleanChunksBySize(maxSize int64) {
 	})
 
 	if err != nil {
-		if err == bolt.ErrDatabaseNotOpen {
+		if err == errors.ErrDatabaseNotOpen {
 			// we're likely a late janitor and we need to end quietly as there's no guarantee of what exists anymore
 			return
 		}
@@ -611,16 +607,16 @@ func (b *Persistent) CleanChunksBySize(maxSize int64) {
 }
 
 // Stats returns a go map with the stats key values
-func (b *Persistent) Stats() (map[string]map[string]interface{}, error) {
-	r := make(map[string]map[string]interface{})
-	r["data"] = make(map[string]interface{})
+func (b *Persistent) Stats() (map[string]map[string]any, error) {
+	r := make(map[string]map[string]any)
+	r["data"] = make(map[string]any)
 	r["data"]["oldest-ts"] = time.Now()
 	r["data"]["oldest-file"] = ""
 	r["data"]["newest-ts"] = time.Now()
 	r["data"]["newest-file"] = ""
 	r["data"]["total-chunks"] = 0
 	r["data"]["total-size"] = int64(0)
-	r["files"] = make(map[string]interface{})
+	r["files"] = make(map[string]any)
 	r["files"]["oldest-ts"] = time.Now()
 	r["files"]["oldest-name"] = ""
 	r["files"]["newest-ts"] = time.Now()
@@ -904,16 +900,16 @@ func (b *Persistent) rollbackPendingUpload(remote string) error {
 		v := bucket.Get([]byte(remote))
 		err = json.Unmarshal(v, tempObj)
 		if err != nil {
-			return fmt.Errorf("pending upload (%v) not found %v", remote, err)
+			return fmt.Errorf("pending upload (%v) not found: %w", remote, err)
 		}
 		tempObj.Started = false
 		v2, err := json.Marshal(tempObj)
 		if err != nil {
-			return fmt.Errorf("pending upload not updated %v", err)
+			return fmt.Errorf("pending upload not updated: %w", err)
 		}
 		err = bucket.Put([]byte(tempObj.DestPath), v2)
 		if err != nil {
-			return fmt.Errorf("pending upload not updated %v", err)
+			return fmt.Errorf("pending upload not updated: %w", err)
 		}
 		return nil
 	})
@@ -969,11 +965,11 @@ func (b *Persistent) updatePendingUpload(remote string, fn func(item *tempUpload
 		}
 		v2, err := json.Marshal(tempObj)
 		if err != nil {
-			return fmt.Errorf("pending upload not updated %v", err)
+			return fmt.Errorf("pending upload not updated: %w", err)
 		}
 		err = bucket.Put([]byte(tempObj.DestPath), v2)
 		if err != nil {
-			return fmt.Errorf("pending upload not updated %v", err)
+			return fmt.Errorf("pending upload not updated: %w", err)
 		}
 
 		return nil

@@ -28,25 +28,44 @@ var retryErrorCodes = []int{
 	509, // Bandwidth Limit Exceeded
 }
 
+var errorRegex = regexp.MustCompile(`#(\d{1,3})`)
+
+func parseFichierError(err error) int {
+	matches := errorRegex.FindStringSubmatch(err.Error())
+	if len(matches) == 0 {
+		return 0
+	}
+	code, err := strconv.Atoi(matches[1])
+	if err != nil {
+		fs.Debugf(nil, "failed parsing fichier error: %v", err)
+		return 0
+	}
+	return code
+}
+
 // shouldRetry returns a boolean as to whether this resp and err
 // deserve to be retried.  It returns the err as a convenience
 func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, error) {
 	if fserrors.ContextError(ctx, &err) {
 		return false, err
 	}
-	// Detect this error which the integration tests provoke
-	// error HTTP error 403 (403 Forbidden) returned body: "{\"message\":\"Flood detected: IP Locked #374\",\"status\":\"KO\"}"
+	// 1Fichier uses HTTP error code 403 (Forbidden) for all kinds of errors with
+	// responses looking like this: "{\"message\":\"Flood detected: IP Locked #374\",\"status\":\"KO\"}"
 	//
-	// https://1fichier.com/api.html
-	//
-	// file/ls.cgi is limited :
-	//
-	// Warning (can be changed in case of abuses) :
-	// List all files of the account is limited to 1 request per hour.
-	// List folders is limited to 5 000 results and 1 request per folder per 30s.
-	if err != nil && strings.Contains(err.Error(), "Flood detected") {
-		fs.Debugf(nil, "Sleeping for 30 seconds due to: %v", err)
-		time.Sleep(30 * time.Second)
+	// We attempt to parse the actual 1Fichier error code from this body and handle it accordingly
+	// Most importantly #374 (Flood detected: IP locked) which the integration tests provoke
+	// The list below is far from complete and should be expanded if we see any more error codes.
+	if err != nil {
+		switch parseFichierError(err) {
+		case 93:
+			return false, err // No such user
+		case 186:
+			return false, err // IP blocked?
+		case 374, 412: // Flood detected seems to be #412 now
+			fs.Debugf(nil, "Sleeping for 30 seconds due to: %v", err)
+			time.Sleep(30 * time.Second)
+		default:
+		}
 	}
 	return fserrors.ShouldRetry(err) || fserrors.ShouldRetryHTTP(resp, retryErrorCodes), err
 }
@@ -98,6 +117,9 @@ func (f *Fs) getDownloadToken(ctx context.Context, url string) (*GetTokenRespons
 		URL:    url,
 		Single: 1,
 		Pass:   f.opt.FilePassword,
+	}
+	if f.opt.CDN {
+		request.CDN = 1
 	}
 	opts := rest.Opts{
 		Method: "POST",
@@ -386,6 +408,32 @@ func (f *Fs) moveFile(ctx context.Context, url string, folderID int, rename stri
 	return response, nil
 }
 
+func (f *Fs) moveDir(ctx context.Context, folderID int, newLeaf string, destinationFolderID int) (response *MoveDirResponse, err error) {
+	request := &MoveDirRequest{
+		FolderID:            folderID,
+		DestinationFolderID: destinationFolderID,
+		Rename:              newLeaf,
+		// DestinationUser:     destinationUser,
+	}
+
+	opts := rest.Opts{
+		Method: "POST",
+		Path:   "/folder/mv.cgi",
+	}
+
+	response = &MoveDirResponse{}
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err := f.rest.CallJSON(ctx, &opts, request, response)
+		return shouldRetry(ctx, resp, err)
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("couldn't move dir: %w", err)
+	}
+
+	return response, nil
+}
+
 func (f *Fs) copyFile(ctx context.Context, url string, folderID int, rename string) (response *CopyFileResponse, err error) {
 	request := &CopyFileRequest{
 		URLs:     []string{url},
@@ -454,7 +502,7 @@ func (f *Fs) getUploadNode(ctx context.Context) (response *GetUploadNodeResponse
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("didnt got an upload node: %w", err)
+		return nil, fmt.Errorf("didn't get an upload node: %w", err)
 	}
 
 	// fs.Debugf(f, "Got Upload node")
@@ -468,7 +516,7 @@ func (f *Fs) uploadFile(ctx context.Context, in io.Reader, size int64, fileName,
 	fileName = f.opt.Enc.FromStandardName(fileName)
 
 	if len(uploadID) > 10 || !isAlphaNumeric(uploadID) {
-		return nil, errors.New("Invalid UploadID")
+		return nil, errors.New("invalid UploadID")
 	}
 
 	opts := rest.Opts{
@@ -510,7 +558,7 @@ func (f *Fs) endUpload(ctx context.Context, uploadID string, nodeurl string) (re
 	// fs.Debugf(f, "Ending File Upload `%s`", uploadID)
 
 	if len(uploadID) > 10 || !isAlphaNumeric(uploadID) {
-		return nil, errors.New("Invalid UploadID")
+		return nil, errors.New("invalid UploadID")
 	}
 
 	opts := rest.Opts{

@@ -17,10 +17,12 @@ Improvements:
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +46,9 @@ const (
 	maxSleep      = 2 * time.Second
 	eventWaitTime = 500 * time.Millisecond
 	decayConstant = 2 // bigger for slower decay, exponential
+
+	sessionIDConfigKey = "session_id"
+	masterKeyConfigKey = "master_key"
 )
 
 var (
@@ -58,14 +63,33 @@ func init() {
 		Description: "Mega",
 		NewFs:       NewFs,
 		Options: []fs.Option{{
-			Name:     "user",
-			Help:     "User name.",
-			Required: true,
+			Name:      "user",
+			Help:      "User name.",
+			Required:  true,
+			Sensitive: true,
 		}, {
 			Name:       "pass",
 			Help:       "Password.",
 			Required:   true,
 			IsPassword: true,
+		}, {
+			Name:     "2fa",
+			Help:     `The 2FA code of your MEGA account if the account is set up with one`,
+			Required: false,
+		}, {
+			Name:      sessionIDConfigKey,
+			Help:      "Session (internal use only)",
+			Required:  false,
+			Advanced:  true,
+			Sensitive: true,
+			Hide:      fs.OptionHideBoth,
+		}, {
+			Name:      masterKeyConfigKey,
+			Help:      "Master key (internal use only)",
+			Required:  false,
+			Advanced:  true,
+			Sensitive: true,
+			Hide:      fs.OptionHideBoth,
 		}, {
 			Name: "debug",
 			Help: `Output more debug from Mega.
@@ -84,6 +108,17 @@ permanently delete objects instead.`,
 			Default:  false,
 			Advanced: true,
 		}, {
+			Name: "use_https",
+			Help: `Use HTTPS for transfers.
+
+MEGA uses plain text HTTP connections by default.
+Some ISPs throttle HTTP connections, this causes transfers to become very slow.
+Enabling this will force MEGA to use HTTPS for all transfers.
+HTTPS is normally not necessary since all data is already encrypted anyway.
+Enabling it will increase CPU usage and add network overhead.`,
+			Default:  false,
+			Advanced: true,
+		}, {
 			Name:     config.ConfigEncoding,
 			Help:     config.ConfigEncodingHelp,
 			Advanced: true,
@@ -98,8 +133,12 @@ permanently delete objects instead.`,
 type Options struct {
 	User       string               `config:"user"`
 	Pass       string               `config:"pass"`
+	TwoFA      string               `config:"2fa"`
+	SessionID  string               `config:"session_id"`
+	MasterKey  string               `config:"master_key"`
 	Debug      bool                 `config:"debug"`
 	HardDelete bool                 `config:"hard_delete"`
+	UseHTTPS   bool                 `config:"use_https"`
 	Enc        encoder.MultiEncoder `config:"encoding"`
 }
 
@@ -118,7 +157,7 @@ type Fs struct {
 
 // Object describes a mega object
 //
-// Will definitely have info but maybe not meta
+// Will definitely have info but maybe not meta.
 //
 // Normally rclone would just store an ID here but go-mega and mega.nz
 // expect you to build an entire tree of all the objects in memory.
@@ -193,7 +232,20 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 	ci := fs.GetConfig(ctx)
 
-	// cache *mega.Mega on username so we can re-use and share
+	// Create Fs
+	root = parsePath(root)
+	f := &Fs{
+		name:  name,
+		root:  root,
+		opt:   *opt,
+		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+	}
+	f.features = (&fs.Features{
+		DuplicateFiles:          true,
+		CanHaveEmptyDirectories: true,
+	}).Fill(ctx, f)
+
+	// cache *mega.Mega on username so we can reuse and share
 	// them between remotes.  They are expensive to make as they
 	// contain all the objects and sharing the objects makes the
 	// move code easier as we don't have to worry about mixing
@@ -204,34 +256,39 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	if srv == nil {
 		srv = mega.New().SetClient(fshttp.NewClient(ctx))
 		srv.SetRetries(ci.LowLevelRetries) // let mega do the low level retries
-		srv.SetLogger(func(format string, v ...interface{}) {
+		srv.SetHTTPS(opt.UseHTTPS)
+		srv.SetLogger(func(format string, v ...any) {
 			fs.Infof("*go-mega*", format, v...)
 		})
 		if opt.Debug {
-			srv.SetDebugger(func(format string, v ...interface{}) {
+			srv.SetDebugger(func(format string, v ...any) {
 				fs.Debugf("*go-mega*", format, v...)
 			})
 		}
 
-		err := srv.Login(opt.User, opt.Pass)
-		if err != nil {
-			return nil, fmt.Errorf("couldn't login: %w", err)
+		if opt.SessionID == "" {
+			fs.Debugf(f, "Using username and password to initialize the Mega API")
+			err := srv.MultiFactorLogin(opt.User, opt.Pass, opt.TwoFA)
+			if err != nil {
+				return nil, fmt.Errorf("couldn't login: %w", err)
+			}
+			megaCache[opt.User] = srv
+			m.Set(sessionIDConfigKey, srv.GetSessionID())
+			encodedMasterKey := base64.StdEncoding.EncodeToString(srv.GetMasterKey())
+			m.Set(masterKeyConfigKey, encodedMasterKey)
+		} else {
+			fs.Debugf(f, "Using previously stored session ID and master key to initialize the Mega API")
+			decodedMasterKey, err := base64.StdEncoding.DecodeString(opt.MasterKey)
+			if err != nil {
+				return nil, fmt.Errorf("couldn't decode master key: %w", err)
+			}
+			err = srv.LoginWithKeys(opt.SessionID, decodedMasterKey)
+			if err != nil {
+				return nil, fmt.Errorf("login with previous auth keys failed: %w", err)
+			}
 		}
-		megaCache[opt.User] = srv
 	}
-
-	root = parsePath(root)
-	f := &Fs{
-		name:  name,
-		root:  root,
-		opt:   *opt,
-		srv:   srv,
-		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
-	}
-	f.features = (&fs.Features{
-		DuplicateFiles:          true,
-		CanHaveEmptyDirectories: true,
-	}).Fill(ctx, f)
+	f.srv = srv
 
 	// Find the root node and check if it is a file or not
 	_, err = f.findRoot(ctx, false)
@@ -347,7 +404,7 @@ func (f *Fs) mkdir(ctx context.Context, rootNode *mega.Node, dir string) (node *
 		}
 	}
 	if err != nil {
-		return nil, fmt.Errorf("internal error: mkdir called with non-existent root node: %w", err)
+		return nil, fmt.Errorf("internal error: mkdir called with nonexistent root node: %w", err)
 	}
 	// i is number of directories to create (may be 0)
 	// node is directory to create them from
@@ -387,7 +444,7 @@ func (f *Fs) findRoot(ctx context.Context, create bool) (*mega.Node, error) {
 		return f._rootNode, nil
 	}
 
-	// Check for pre-existing root
+	// Check for preexisting root
 	absRoot := f.srv.FS.GetRoot()
 	node, err := f.findDir(absRoot, f.root)
 	//log.Printf("findRoot findDir %p %v", node, err)
@@ -484,11 +541,8 @@ func (f *Fs) list(ctx context.Context, dir *mega.Node, fn listFn) (found bool, e
 	if err != nil {
 		return false, fmt.Errorf("list failed: %w", err)
 	}
-	for _, item := range nodes {
-		if fn(item) {
-			found = true
-			break
-		}
+	if slices.ContainsFunc(nodes, fn) {
+		found = true
 	}
 	return
 }
@@ -536,7 +590,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // Creates from the parameters passed in a half finished Object which
 // must have setMetaData called on it
 //
-// Returns the dirNode, object, leaf and error
+// Returns the dirNode, object, leaf and error.
 //
 // Used to create new objects
 func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time, size int64) (o *Object, dirNode *mega.Node, leaf string, err error) {
@@ -554,7 +608,7 @@ func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time,
 
 // Put the object
 //
-// Copy the reader in to the new object which is returned
+// Copy the reader in to the new object which is returned.
 //
 // The new object may have been created if an error is returned
 // PutUnchecked uploads the object
@@ -576,7 +630,7 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 
 // PutUnchecked the object
 //
-// Copy the reader in to the new object which is returned
+// Copy the reader in to the new object which is returned.
 //
 // The new object may have been created if an error is returned
 // PutUnchecked uploads the object
@@ -749,9 +803,9 @@ func (f *Fs) move(ctx context.Context, dstRemote string, srcFs *Fs, srcRemote st
 
 // Move src to this remote using server-side move operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -914,9 +968,9 @@ func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
 		return nil, fmt.Errorf("failed to get Mega Quota: %w", err)
 	}
 	usage := &fs.Usage{
-		Total: fs.NewUsageValue(int64(q.Mstrg)),           // quota of bytes that can be used
-		Used:  fs.NewUsageValue(int64(q.Cstrg)),           // bytes in use
-		Free:  fs.NewUsageValue(int64(q.Mstrg - q.Cstrg)), // bytes which can be uploaded before reaching the quota
+		Total: fs.NewUsageValue(q.Mstrg),           // quota of bytes that can be used
+		Used:  fs.NewUsageValue(q.Cstrg),           // bytes in use
+		Free:  fs.NewUsageValue(q.Mstrg - q.Cstrg), // bytes which can be uploaded before reaching the quota
 	}
 	return usage, nil
 }
@@ -978,7 +1032,6 @@ func (o *Object) readMetaData(ctx context.Context) (err error) {
 }
 
 // ModTime returns the modification time of the object
-//
 //
 // It attempts to read the objects mtime and if that isn't present the
 // LastModified returned in the http headers
@@ -1115,7 +1168,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 
 // Update the object with the contents of the io.Reader, modTime and size
 //
-// If existing is set then it updates the object rather than creating a new one
+// If existing is set then it updates the object rather than creating a new one.
 //
 // The new object may have been created if an error is returned
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
@@ -1143,7 +1196,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 
 	// Upload the chunks
 	// FIXME do this in parallel
-	for id := 0; id < u.Chunks(); id++ {
+	for id := range u.Chunks() {
 		_, chunkSize, err := u.ChunkLocation(id)
 		if err != nil {
 			return fmt.Errorf("upload failed to read chunk location: %w", err)

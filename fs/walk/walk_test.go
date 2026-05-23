@@ -163,7 +163,7 @@ func (ls *listDirs) WalkFn(dir string, entries fs.DirEntries, err error) error {
 // Walk does the walk and tests the expectations
 func (ls *listDirs) Walk() {
 	err := walk(context.Background(), nil, "", ls.includeAll, ls.maxLevel, ls.WalkFn, ls.ListDir)
-	assert.Equal(ls.t, ls.finalError, err)
+	assert.True(ls.t, errors.Is(ls.finalError, err))
 	ls.IsFinished()
 }
 
@@ -736,13 +736,13 @@ b/c/d/
   e
 `, nil, "", -1, "ign", true},
 	} {
-		fi.Opt.ExcludeFile = test.excludeFile
+		fi.Opt.ExcludeFile = []string{test.excludeFile}
 		r, err := walkRDirTree(context.Background(), nil, test.root, test.includeAll, test.level, makeListRCallback(test.entries, test.err))
 		assert.Equal(t, test.err, err, fmt.Sprintf("%+v", test))
 		assert.Equal(t, test.want, r.String(), fmt.Sprintf("%+v", test))
 	}
 	// Set to default value, to avoid side effects
-	fi.Opt.ExcludeFile = ""
+	fi.Opt.ExcludeFile = nil
 }
 
 func TestListType(t *testing.T) {
@@ -798,7 +798,8 @@ func TestListR(t *testing.T) {
 		mockobject.Object("dir/b"),
 		mockobject.Object("dir/c"),
 	}
-	f := mockfs.NewFs(ctx, "mock", "/")
+	f, err := mockfs.NewFs(ctx, "mock", "/", nil)
+	require.NoError(t, err)
 	var got []string
 	clearCallback := func() {
 		got = nil
