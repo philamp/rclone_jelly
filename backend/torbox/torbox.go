@@ -537,14 +537,33 @@ func (f *Fs) fromRoot(remote string) string {
 	return strings.TrimPrefix(remote, f.root+"/")
 }
 
-// List the objects and directories in dir into entries.
-func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
-	dir = strings.Trim(dir, "/")
-	err = f.refresh(ctx)
-	if err != nil {
-		return nil, err
+func (f *Fs) shouldRefreshForDir(actualDir string) bool {
+	f.mu.Lock()
+	cacheEmpty := f.cacheTime.IsZero()
+	f.mu.Unlock()
+	if cacheEmpty {
+		return true
 	}
-	actualDir := f.actualPath(dir)
+	if actualDir == "" {
+		return true
+	}
+	if f.opt.FolderMode == "folders" {
+		switch actualDir {
+		case "shows", "movies", "default":
+			return true
+		}
+	}
+	return false
+}
+
+func (f *Fs) cachedDirExists(actualDir string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.dirs[actualDir]
+	return ok
+}
+
+func (f *Fs) listFromCache(actualDir string) (entries fs.DirEntries, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, ok := f.dirs[actualDir]; !ok {
@@ -569,18 +588,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 	return entries, nil
 }
 
-func (f *Fs) newObjectWithInfo(remote string, info *entry) (fs.Object, error) {
-	o := &Object{fs: f, remote: remote}
-	return o, o.setMetaData(info)
-}
-
-// NewObject finds the Object at remote.
-func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
-	remote = strings.Trim(remote, "/")
-	err := f.refresh(ctx)
-	if err != nil {
-		return nil, err
-	}
+func (f *Fs) objectFromCache(remote string) (fs.Object, bool, error) {
 	f.mu.Lock()
 	info, ok := f.files[f.actualPath(remote)]
 	if ok {
@@ -589,9 +597,53 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	}
 	f.mu.Unlock()
 	if !ok {
+		return nil, false, nil
+	}
+	obj, err := f.newObjectWithInfo(remote, info)
+	return obj, true, err
+}
+
+// List the objects and directories in dir into entries.
+func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
+	dir = strings.Trim(dir, "/")
+	actualDir := f.actualPath(dir)
+	if !f.shouldRefreshForDir(actualDir) && f.cachedDirExists(actualDir) {
+		return f.listFromCache(actualDir)
+	}
+	err = f.refresh(ctx)
+	if err != nil {
+		if f.cachedDirExists(actualDir) {
+			return f.listFromCache(actualDir)
+		}
+		return nil, err
+	}
+	return f.listFromCache(actualDir)
+}
+
+func (f *Fs) newObjectWithInfo(remote string, info *entry) (fs.Object, error) {
+	o := &Object{fs: f, remote: remote}
+	return o, o.setMetaData(info)
+}
+
+// NewObject finds the Object at remote.
+func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
+	remote = strings.Trim(remote, "/")
+	obj, found, err := f.objectFromCache(remote)
+	if found || err != nil {
+		return obj, err
+	}
+	err = f.refresh(ctx)
+	if err != nil {
+		return nil, err
+	}
+	obj, found, err = f.objectFromCache(remote)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
 		return nil, fs.ErrorObjectNotFound
 	}
-	return f.newObjectWithInfo(remote, info)
+	return obj, nil
 }
 
 // Mkdir is unsupported on read-only TorBox remotes.
