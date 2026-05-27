@@ -99,12 +99,14 @@ type Fs struct {
 	opt      Options
 	features *fs.Features
 	srv      *rest.Client
+	dlSrv    *rest.Client
 	pacer    *fs.Pacer
 
 	mu        sync.Mutex
 	cacheTime time.Time
 	dirs      map[string]*entry
 	files     map[string]*entry
+	dlURLs    map[string]string
 }
 
 // Object describes a TorBox file.
@@ -209,13 +211,15 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	srv.SetErrorHandler(errorHandler)
 
 	f := &Fs{
-		name:  name,
-		root:  root,
-		opt:   *opt,
-		srv:   srv,
-		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
-		dirs:  make(map[string]*entry),
-		files: make(map[string]*entry),
+		name:   name,
+		root:   root,
+		opt:    *opt,
+		srv:    srv,
+		dlSrv:  rest.NewClient(client),
+		pacer:  fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+		dirs:   make(map[string]*entry),
+		files:  make(map[string]*entry),
+		dlURLs: make(map[string]string),
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,
@@ -539,10 +543,13 @@ func (f *Fs) fromRoot(remote string) string {
 
 func (f *Fs) shouldRefreshForDir(actualDir string) bool {
 	f.mu.Lock()
-	cacheEmpty := f.cacheTime.IsZero()
+	cacheTime := f.cacheTime
 	f.mu.Unlock()
-	if cacheEmpty {
+	if cacheTime.IsZero() {
 		return true
+	}
+	if cacheDuration <= 0 || time.Since(cacheTime) < cacheDuration {
+		return false
 	}
 	if actualDir == "" {
 		return true
@@ -736,6 +743,116 @@ func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error { retu
 // Storable returns whether this object is storable.
 func (o *Object) Storable() bool { return true }
 
+func (o *Object) downloadKey() string {
+	return fmt.Sprintf("%s:%d:%d", o.source, o.transferID, o.fileID)
+}
+
+func (f *Fs) cachedDownloadURL(key string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dlURLs[key]
+}
+
+func (f *Fs) setDownloadURL(key, downloadURL string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dlURLs[key] = downloadURL
+}
+
+func (f *Fs) clearDownloadURL(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.dlURLs, key)
+}
+
+func (o *Object) downloadRequest() (string, url.Values, error) {
+	params := url.Values{}
+	params.Set("token", o.fs.opt.APIKey)
+	switch o.source {
+	case sourceTorrent:
+		params.Set("torrent_id", strconv.Itoa(o.transferID))
+	case sourceUsenet:
+		params.Set("usenet_id", strconv.Itoa(o.transferID))
+	default:
+		return "", nil, fmt.Errorf("can't download - unknown source %q", o.source)
+	}
+	params.Set("file_id", strconv.Itoa(o.fileID))
+	params.Set("redirect", "true")
+	params.Set("append_name", "true")
+	requestPath := "/torrents/requestdl"
+	if o.source == sourceUsenet {
+		requestPath = "/usenet/requestdl"
+	}
+	return requestPath, params, nil
+}
+
+func (o *Object) requestDownloadURL(ctx context.Context) (string, error) {
+	requestPath, params, err := o.downloadRequest()
+	if err != nil {
+		return "", err
+	}
+	opts := rest.Opts{
+		Method:       "GET",
+		Path:         requestPath,
+		Parameters:   params,
+		NoRedirect:   true,
+		IgnoreStatus: true,
+	}
+	var resp *http.Response
+	err = o.fs.pacer.Call(func() (bool, error) {
+		resp, err = o.fs.srv.Call(ctx, &opts)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return "", err
+	}
+	if resp == nil {
+		return "", errors.New("requestdl returned no response")
+	}
+	if resp.StatusCode >= 300 && resp.StatusCode <= 399 {
+		defer fs.CheckClose(resp.Body, &err)
+		location := resp.Header.Get("Location")
+		if location == "" {
+			return "", fmt.Errorf("requestdl returned %s without Location header", resp.Status)
+		}
+		locationURL, err := url.Parse(location)
+		if err != nil {
+			return "", err
+		}
+		return resp.Request.URL.ResolveReference(locationURL).String(), nil
+	}
+	body, readErr := rest.ReadBody(resp)
+	if readErr != nil {
+		return "", readErr
+	}
+	var result struct {
+		api.Response
+		Data string `json:"data"`
+	}
+	if err = json.Unmarshal(body, &result); err == nil && result.Data != "" {
+		return result.Data, nil
+	}
+	return "", fmt.Errorf("requestdl returned %s without download URL", resp.Status)
+}
+
+func (o *Object) openDownloadURL(ctx context.Context, downloadURL string, options []fs.OpenOption) (io.ReadCloser, error) {
+	opts := rest.Opts{
+		Method:  "GET",
+		RootURL: downloadURL,
+		Options: options,
+	}
+	var resp *http.Response
+	var err error
+	err = o.fs.pacer.Call(func() (bool, error) {
+		resp, err = o.fs.dlSrv.Call(ctx, &opts)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
 // Open an object for read.
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadCloser, error) {
 	err := o.readMetaData(ctx)
@@ -746,38 +863,27 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 		return nil, errors.New("can't download - missing transfer ID")
 	}
 	fs.FixRangeOption(options, o.size)
-	params := url.Values{}
-	params.Set("token", o.fs.opt.APIKey)
-	switch o.source {
-	case sourceTorrent:
-		params.Set("torrent_id", strconv.Itoa(o.transferID))
-	case sourceUsenet:
-		params.Set("usenet_id", strconv.Itoa(o.transferID))
-	default:
-		return nil, fmt.Errorf("can't download - unknown source %q", o.source)
+	key := o.downloadKey()
+	downloadURL := o.fs.cachedDownloadURL(key)
+	if downloadURL != "" {
+		in, err := o.openDownloadURL(ctx, downloadURL, options)
+		if err == nil {
+			return in, nil
+		}
+		o.fs.clearDownloadURL(key)
+		fs.Debugf(o, "Cached TorBox download URL failed, requesting a new one: %v", err)
 	}
-	params.Set("file_id", strconv.Itoa(o.fileID))
-	params.Set("redirect", "true")
-	params.Set("append_name", "true")
-	requestPath := "/torrents/requestdl"
-	if o.source == sourceUsenet {
-		requestPath = "/usenet/requestdl"
-	}
-	opts := rest.Opts{
-		Method:     "GET",
-		Path:       requestPath,
-		Parameters: params,
-		Options:    options,
-	}
-	var resp *http.Response
-	err = o.fs.pacer.Call(func() (bool, error) {
-		resp, err = o.fs.srv.Call(ctx, &opts)
-		return shouldRetry(ctx, resp, err)
-	})
+	downloadURL, err = o.requestDownloadURL(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return resp.Body, nil
+	o.fs.setDownloadURL(key, downloadURL)
+	in, err := o.openDownloadURL(ctx, downloadURL, options)
+	if err != nil {
+		o.fs.clearDownloadURL(key)
+		return nil, err
+	}
+	return in, nil
 }
 
 // Update is unsupported on read-only TorBox remotes.
