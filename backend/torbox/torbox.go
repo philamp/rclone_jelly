@@ -1,4 +1,4 @@
-// Package torbox provides an interface to TorBox torrents.
+// Package torbox provides an interface to TorBox torrents and Usenet downloads.
 package torbox
 
 import (
@@ -116,21 +116,30 @@ type Object struct {
 	modTime     time.Time
 	id          string
 	mimeType    string
-	torrentID   int
+	source      sourceType
+	transferID  int
 	fileID      int
 }
 
 type entry struct {
-	remote    string
-	name      string
-	isDir     bool
-	id        string
-	size      int64
-	modTime   time.Time
-	mimeType  string
-	torrentID int
-	fileID    int
+	remote     string
+	name       string
+	isDir      bool
+	id         string
+	size       int64
+	modTime    time.Time
+	mimeType   string
+	source     sourceType
+	transferID int
+	fileID     int
 }
+
+type sourceType string
+
+const (
+	sourceTorrent sourceType = "torrent"
+	sourceUsenet  sourceType = "usenet"
+)
 
 // Name of the remote.
 func (f *Fs) Name() string { return f.name }
@@ -229,10 +238,19 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	return f, nil
 }
 
-func (f *Fs) listTorrents(ctx context.Context) ([]api.Torrent, error) {
+type transferList struct {
+	source sourceType
+	items  []api.Transfer
+}
+
+func (f *Fs) listTransfers(ctx context.Context, source sourceType) ([]api.Transfer, error) {
 	const limit = 1000
-	var torrents []api.Torrent
+	var transfers []api.Transfer
 	offset := 0
+	endpoint := "/" + string(source) + "s/mylist"
+	if source == sourceUsenet {
+		endpoint = "/usenet/mylist"
+	}
 	for {
 		params := url.Values{}
 		params.Set("limit", strconv.Itoa(limit))
@@ -242,11 +260,11 @@ func (f *Fs) listTorrents(ctx context.Context) ([]api.Torrent, error) {
 		}
 		opts := rest.Opts{
 			Method:     "GET",
-			Path:       "/torrents/mylist",
+			Path:       endpoint,
 			Parameters: params,
 		}
 		var resp *http.Response
-		var result api.TorrentListResponse
+		var result api.TransferListResponse
 		var err error
 		err = f.pacer.Call(func() (bool, error) {
 			resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
@@ -258,13 +276,13 @@ func (f *Fs) listTorrents(ctx context.Context) ([]api.Torrent, error) {
 		if !result.Success {
 			return nil, &result.Response
 		}
-		torrents = append(torrents, result.Data...)
+		transfers = append(transfers, result.Data...)
 		if len(result.Data) < limit {
 			break
 		}
 		offset += len(result.Data)
 	}
-	return torrents, nil
+	return transfers, nil
 }
 
 func (f *Fs) refresh(ctx context.Context) error {
@@ -273,9 +291,17 @@ func (f *Fs) refresh(ctx context.Context) error {
 	if time.Since(f.cacheTime) < cacheDuration && f.dirs != nil && f.files != nil {
 		return nil
 	}
-	torrents, err := f.listTorrents(ctx)
+	torrents, err := f.listTransfers(ctx, sourceTorrent)
 	if err != nil {
 		return fmt.Errorf("couldn't list torrents: %w", err)
+	}
+	usenet, err := f.listTransfers(ctx, sourceUsenet)
+	if err != nil {
+		return fmt.Errorf("couldn't list usenet downloads: %w", err)
+	}
+	lists := []transferList{
+		{source: sourceTorrent, items: torrents},
+		{source: sourceUsenet, items: usenet},
 	}
 
 	dirs := make(map[string]*entry)
@@ -298,46 +324,49 @@ func (f *Fs) refresh(ctx context.Context) error {
 		}
 	}
 
-	for _, torrent := range torrents {
-		if !torrentReady(torrent) {
-			continue
-		}
-		modTime := parseTime(torrent.CachedAt, torrent.UpdatedAt, torrent.CreatedAt)
-		category := f.category(torrent.Name)
-		torrentName := cleanSegment(f.opt.Enc.ToStandardName(torrent.Name))
-		if torrentName == "" {
-			torrentName = strconv.Itoa(torrent.ID)
-		}
-
-		baseDir := ""
-		if f.opt.FolderMode == "folders" {
-			addDir(category, modTime)
-			baseDir = uniqueDir(dirs, path.Join(category, torrentName), torrent.ID, modTime)
-		}
-
-		for _, file := range torrent.Files {
-			fileRemote := cleanFilePath(file, torrent.Name)
-			if fileRemote == "" {
-				fileRemote = file.Name
+	for _, list := range lists {
+		for _, transfer := range list.items {
+			if !transferReady(transfer) {
+				continue
 			}
-			fileRemote = encodePath(f.opt.Enc, fileRemote)
+			modTime := parseTime(transfer.CachedAt, transfer.UpdatedAt, transfer.CreatedAt)
+			category := f.category(transfer.Name)
+			transferName := cleanSegment(f.opt.Enc.ToStandardName(transfer.Name))
+			if transferName == "" {
+				transferName = strconv.Itoa(transfer.ID)
+			}
+
+			baseDir := ""
 			if f.opt.FolderMode == "folders" {
-				fileRemote = path.Join(baseDir, fileRemote)
+				addDir(category, modTime)
+				baseDir = uniqueDir(dirs, path.Join(category, transferName), list.source, transfer.ID, modTime)
 			}
-			fileRemote = uniqueFile(files, fileRemote, torrent.ID, file.ID)
-			parent := path.Dir(fileRemote)
-			if parent != "." {
-				addDir(parent, modTime)
-			}
-			files[fileRemote] = &entry{
-				remote:    fileRemote,
-				name:      path.Base(fileRemote),
-				id:        fmt.Sprintf("%d:%d", torrent.ID, file.ID),
-				size:      file.Size,
-				modTime:   modTime,
-				mimeType:  file.MimeType,
-				torrentID: torrent.ID,
-				fileID:    file.ID,
+
+			for _, file := range transfer.Files {
+				fileRemote := cleanFilePath(file, transfer.Name, transfer.Hash)
+				if fileRemote == "" {
+					fileRemote = file.Name
+				}
+				fileRemote = encodePath(f.opt.Enc, fileRemote)
+				if f.opt.FolderMode == "folders" {
+					fileRemote = path.Join(baseDir, fileRemote)
+				}
+				fileRemote = uniqueFile(files, fileRemote, list.source, transfer.ID, file.ID)
+				parent := path.Dir(fileRemote)
+				if parent != "." {
+					addDir(parent, modTime)
+				}
+				files[fileRemote] = &entry{
+					remote:     fileRemote,
+					name:       path.Base(fileRemote),
+					id:         fmt.Sprintf("%s:%d:%d", list.source, transfer.ID, file.ID),
+					size:       file.Size,
+					modTime:    modTime,
+					mimeType:   file.MimeType,
+					source:     list.source,
+					transferID: transfer.ID,
+					fileID:     file.ID,
+				}
 			}
 		}
 	}
@@ -348,7 +377,7 @@ func (f *Fs) refresh(ctx context.Context) error {
 	return nil
 }
 
-func torrentReady(t api.Torrent) bool {
+func transferReady(t api.Transfer) bool {
 	if t.DownloadFinished || t.Cached || t.DownloadPresent {
 		return true
 	}
@@ -386,22 +415,38 @@ func (f *Fs) category(name string) string {
 	return "default"
 }
 
-func cleanFilePath(file api.File, torrentName string) string {
+func cleanFilePath(file api.File, torrentName, torrentHash string) string {
 	value := file.AbsolutePath
 	if value == "" {
 		value = file.Name
 	}
 	value = strings.Trim(value, "/")
 	torrentName = strings.Trim(torrentName, "/")
+	torrentHash = strings.Trim(torrentHash, "/")
+	value = stripPathPrefix(value, "completed", torrentHash)
 	if strings.EqualFold(path.Clean(value), path.Clean(torrentName)) {
 		value = file.Name
 	}
-	prefix := strings.Trim(torrentName, "/") + "/"
-	if strings.HasPrefix(strings.ToLower(value), strings.ToLower(prefix)) {
-		value = value[len(prefix):]
-	}
+	value = stripPathPrefix(value, torrentName)
 	if value == "" {
 		value = file.ShortName
+	}
+	return value
+}
+
+func stripPathPrefix(value string, prefixes ...string) string {
+	for _, prefix := range prefixes {
+		prefix = strings.Trim(prefix, "/")
+		if prefix == "" {
+			continue
+		}
+		if strings.EqualFold(value, prefix) {
+			return ""
+		}
+		withSlash := prefix + "/"
+		if strings.HasPrefix(strings.ToLower(value), strings.ToLower(withSlash)) {
+			value = value[len(withSlash):]
+		}
 	}
 	return value
 }
@@ -423,22 +468,22 @@ func cleanSegment(value string) string {
 	return value
 }
 
-func uniqueDir(dirs map[string]*entry, remote string, id int, modTime time.Time) string {
+func uniqueDir(dirs map[string]*entry, remote string, source sourceType, id int, modTime time.Time) string {
 	remote = strings.Trim(remote, "/")
 	out := remote
 	if _, ok := dirs[out]; ok {
-		out = addSuffix(remote, strconv.Itoa(id))
+		out = addSuffix(remote, fmt.Sprintf("%s-%d", source, id))
 	}
-	dirs[out] = &entry{remote: out, name: path.Base(out), isDir: true, id: strconv.Itoa(id), modTime: modTime}
+	dirs[out] = &entry{remote: out, name: path.Base(out), isDir: true, id: fmt.Sprintf("%s:%d", source, id), modTime: modTime}
 	return out
 }
 
-func uniqueFile(files map[string]*entry, remote string, torrentID, fileID int) string {
+func uniqueFile(files map[string]*entry, remote string, source sourceType, transferID, fileID int) string {
 	remote = strings.Trim(remote, "/")
 	if _, ok := files[remote]; !ok {
 		return remote
 	}
-	return addSuffix(remote, fmt.Sprintf("%d-%d", torrentID, fileID))
+	return addSuffix(remote, fmt.Sprintf("%s-%d-%d", source, transferID, fileID))
 }
 
 func addSuffix(remote, suffix string) string {
@@ -586,7 +631,8 @@ func (o *Object) setMetaData(info *entry) error {
 	o.modTime = info.modTime
 	o.id = info.id
 	o.mimeType = info.mimeType
-	o.torrentID = info.torrentID
+	o.source = info.source
+	o.transferID = info.transferID
 	o.fileID = info.fileID
 	return nil
 }
@@ -600,13 +646,14 @@ func (o *Object) readMetaData(ctx context.Context) error {
 		return err
 	}
 	return o.setMetaData(&entry{
-		remote:    obj.Remote(),
-		size:      obj.Size(),
-		modTime:   obj.ModTime(ctx),
-		torrentID: obj.(*Object).torrentID,
-		fileID:    obj.(*Object).fileID,
-		mimeType:  obj.(*Object).mimeType,
-		id:        obj.(*Object).id,
+		remote:     obj.Remote(),
+		size:       obj.Size(),
+		modTime:    obj.ModTime(ctx),
+		source:     obj.(*Object).source,
+		transferID: obj.(*Object).transferID,
+		fileID:     obj.(*Object).fileID,
+		mimeType:   obj.(*Object).mimeType,
+		id:         obj.(*Object).id,
 	})
 }
 
@@ -625,19 +672,30 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	if err != nil {
 		return nil, err
 	}
-	if o.torrentID == 0 {
-		return nil, errors.New("can't download - missing torrent ID")
+	if o.transferID == 0 {
+		return nil, errors.New("can't download - missing transfer ID")
 	}
 	fs.FixRangeOption(options, o.size)
 	params := url.Values{}
 	params.Set("token", o.fs.opt.APIKey)
-	params.Set("torrent_id", strconv.Itoa(o.torrentID))
+	switch o.source {
+	case sourceTorrent:
+		params.Set("torrent_id", strconv.Itoa(o.transferID))
+	case sourceUsenet:
+		params.Set("usenet_id", strconv.Itoa(o.transferID))
+	default:
+		return nil, fmt.Errorf("can't download - unknown source %q", o.source)
+	}
 	params.Set("file_id", strconv.Itoa(o.fileID))
 	params.Set("redirect", "true")
 	params.Set("append_name", "true")
+	requestPath := "/torrents/requestdl"
+	if o.source == sourceUsenet {
+		requestPath = "/usenet/requestdl"
+	}
 	opts := rest.Opts{
 		Method:     "GET",
-		Path:       "/torrents/requestdl",
+		Path:       requestPath,
 		Parameters: params,
 		Options:    options,
 	}

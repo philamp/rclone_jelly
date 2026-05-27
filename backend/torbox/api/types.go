@@ -18,14 +18,14 @@ func (e *Response) Error() string {
 	return e.Detail
 }
 
-// TorrentListResponse is the response to /torrents/mylist.
-type TorrentListResponse struct {
+// TransferListResponse is the response to transfer list endpoints.
+type TransferListResponse struct {
 	Response
-	Data []Torrent `json:"data"`
+	Data []Transfer `json:"data"`
 }
 
-// Torrent is a TorBox torrent item.
-type Torrent struct {
+// Transfer is a TorBox torrent or Usenet item.
+type Transfer struct {
 	ID               int    `json:"id"`
 	Hash             string `json:"hash"`
 	Name             string `json:"name"`
