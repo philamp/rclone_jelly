@@ -35,7 +35,7 @@ const (
 	maxSleep      = 5 * time.Second
 	decayConstant = 2
 	rootURL       = "https://api.torbox.app/v1/api"
-	cacheDuration = 10 * time.Minute
+	cacheDuration = 2 * time.Second
 )
 
 var errReadOnly = errors.New("torbox remotes are read only")
@@ -378,11 +378,11 @@ func (f *Fs) refresh(ctx context.Context) error {
 }
 
 func transferReady(t api.Transfer) bool {
-	if t.DownloadFinished || t.Cached || t.DownloadPresent {
+	if t.DownloadFinished {
 		return true
 	}
 	switch strings.ToLower(t.DownloadState) {
-	case "uploading", "cached":
+	case "completed":
 		return true
 	default:
 		return false
@@ -423,6 +423,7 @@ func cleanFilePath(file api.File, torrentName, torrentHash string) string {
 	value = strings.Trim(value, "/")
 	torrentName = strings.Trim(torrentName, "/")
 	torrentHash = strings.Trim(torrentHash, "/")
+	value = stripPathAfterSegment(value, torrentName)
 	value = stripPathPrefix(value, "completed", torrentHash)
 	if strings.EqualFold(path.Clean(value), path.Clean(torrentName)) {
 		value = file.Name
@@ -430,6 +431,23 @@ func cleanFilePath(file api.File, torrentName, torrentHash string) string {
 	value = stripPathPrefix(value, torrentName)
 	if value == "" {
 		value = file.ShortName
+	}
+	return value
+}
+
+func stripPathAfterSegment(value, segment string) string {
+	segment = strings.Trim(segment, "/")
+	if segment == "" {
+		return value
+	}
+	parts := strings.Split(value, "/")
+	for i, part := range parts {
+		if strings.EqualFold(part, segment) {
+			if i+1 >= len(parts) {
+				return ""
+			}
+			return path.Join(parts[i+1:]...)
+		}
 	}
 	return value
 }
