@@ -346,6 +346,13 @@ func (f *Fs) refresh(ctx context.Context) error {
 		}
 	}
 
+	if f.opt.FolderMode == "folders" {
+		now := time.Now()
+		addDir("shows", now)
+		addDir("movies", now)
+		addDir("default", now)
+	}
+
 	for _, list := range lists {
 		for _, transfer := range list.items {
 			if !transferReady(transfer) {
@@ -566,11 +573,11 @@ func (f *Fs) shouldRefreshForDir(actualDir string) bool {
 	if cacheTime.IsZero() {
 		return true
 	}
-	if cacheDuration <= 0 || time.Since(cacheTime) < cacheDuration {
+	if actualDir == "" {
 		return false
 	}
-	if actualDir == "" {
-		return true
+	if cacheDuration <= 0 || time.Since(cacheTime) < cacheDuration {
+		return false
 	}
 	if f.opt.FolderMode == "folders" {
 		switch actualDir {
