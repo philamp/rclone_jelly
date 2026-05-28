@@ -174,6 +174,16 @@ func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, err
 	return fserrors.ShouldRetry(err) || fserrors.ShouldRetryHTTP(resp, retryErrorCodes), err
 }
 
+func redactedURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "<invalid url>"
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
 func errorHandler(resp *http.Response) error {
 	body, err := rest.ReadBody(resp)
 	if err != nil {
@@ -270,16 +280,24 @@ func (f *Fs) listTransfers(ctx context.Context, source sourceType) ([]api.Transf
 		var resp *http.Response
 		var result api.TransferListResponse
 		var err error
+		fs.Debugf(f, "TorBox API call: GET %s limit=%d offset=%d", endpoint, limit, offset)
 		err = f.pacer.Call(func() (bool, error) {
 			resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
 			return shouldRetry(ctx, resp, err)
 		})
 		if err != nil {
+			fs.Debugf(f, "TorBox API error: GET %s offset=%d: %v", endpoint, offset, err)
 			return nil, err
 		}
 		if !result.Success {
+			fs.Debugf(f, "TorBox API unsuccessful response: GET %s offset=%d: %v", endpoint, offset, result.Response.Error())
 			return nil, &result.Response
 		}
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		fs.Debugf(f, "TorBox API response: GET %s status=%d items=%d", endpoint, status, len(result.Data))
 		transfers = append(transfers, result.Data...)
 		if len(result.Data) < limit {
 			break
@@ -799,16 +817,19 @@ func (o *Object) requestDownloadURL(ctx context.Context) (string, error) {
 		IgnoreStatus: true,
 	}
 	var resp *http.Response
+	fs.Debugf(o, "TorBox API call: GET %s source=%s transfer_id=%d file_id=%d", requestPath, o.source, o.transferID, o.fileID)
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = o.fs.srv.Call(ctx, &opts)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
+		fs.Debugf(o, "TorBox API error: GET %s source=%s transfer_id=%d file_id=%d: %v", requestPath, o.source, o.transferID, o.fileID, err)
 		return "", err
 	}
 	if resp == nil {
 		return "", errors.New("requestdl returned no response")
 	}
+	fs.Debugf(o, "TorBox API response: GET %s status=%d source=%s transfer_id=%d file_id=%d", requestPath, resp.StatusCode, o.source, o.transferID, o.fileID)
 	if resp.StatusCode >= 300 && resp.StatusCode <= 399 {
 		defer fs.CheckClose(resp.Body, &err)
 		location := resp.Header.Get("Location")
@@ -819,7 +840,9 @@ func (o *Object) requestDownloadURL(ctx context.Context) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return resp.Request.URL.ResolveReference(locationURL).String(), nil
+		downloadURL := resp.Request.URL.ResolveReference(locationURL).String()
+		fs.Debugf(o, "TorBox requestdl URL resolved: %s", redactedURL(downloadURL))
+		return downloadURL, nil
 	}
 	body, readErr := rest.ReadBody(resp)
 	if readErr != nil {
@@ -830,6 +853,7 @@ func (o *Object) requestDownloadURL(ctx context.Context) (string, error) {
 		Data string `json:"data"`
 	}
 	if err = json.Unmarshal(body, &result); err == nil && result.Data != "" {
+		fs.Debugf(o, "TorBox requestdl URL returned: %s", redactedURL(result.Data))
 		return result.Data, nil
 	}
 	return "", fmt.Errorf("requestdl returned %s without download URL", resp.Status)
@@ -843,12 +867,17 @@ func (o *Object) openDownloadURL(ctx context.Context, downloadURL string, option
 	}
 	var resp *http.Response
 	var err error
+	fs.Debugf(o, "TorBox CDN open: %s", redactedURL(downloadURL))
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = o.fs.dlSrv.Call(ctx, &opts)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
+		fs.Debugf(o, "TorBox CDN open failed: %s: %v", redactedURL(downloadURL), err)
 		return nil, err
+	}
+	if resp != nil {
+		fs.Debugf(o, "TorBox CDN open response: %s status=%d", redactedURL(downloadURL), resp.StatusCode)
 	}
 	return resp.Body, nil
 }
@@ -866,18 +895,22 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	key := o.downloadKey()
 	downloadURL := o.fs.cachedDownloadURL(key)
 	if downloadURL != "" {
+		fs.Debugf(o, "TorBox CDN URL cache hit: source=%s transfer_id=%d file_id=%d", o.source, o.transferID, o.fileID)
 		in, err := o.openDownloadURL(ctx, downloadURL, options)
 		if err == nil {
 			return in, nil
 		}
 		o.fs.clearDownloadURL(key)
 		fs.Debugf(o, "Cached TorBox download URL failed, requesting a new one: %v", err)
+	} else {
+		fs.Debugf(o, "TorBox CDN URL cache miss: source=%s transfer_id=%d file_id=%d", o.source, o.transferID, o.fileID)
 	}
 	downloadURL, err = o.requestDownloadURL(ctx)
 	if err != nil {
 		return nil, err
 	}
 	o.fs.setDownloadURL(key, downloadURL)
+	fs.Debugf(o, "TorBox CDN URL cached: source=%s transfer_id=%d file_id=%d", o.source, o.transferID, o.fileID)
 	in, err := o.openDownloadURL(ctx, downloadURL, options)
 	if err != nil {
 		o.fs.clearDownloadURL(key)
