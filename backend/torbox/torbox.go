@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,21 +50,6 @@ func init() {
 			Help:      "TorBox API key.",
 			Sensitive: true,
 		}, {
-			Name:     "folder_mode",
-			Help:     `Choose whether torrents are grouped into virtual folders. Use "folders" for shows/movies/default torrent folders, or "files" for all files in the root. Default: "folders".`,
-			Advanced: true,
-			Default:  "folders",
-		}, {
-			Name:     "regex_shows",
-			Help:     `Regex used to classify torrents as shows.`,
-			Advanced: true,
-			Default:  `(?i)(S[0-9]{2}|SEASON|COMPLETE|[^457a-z\W\s]-[0-9]+)`,
-		}, {
-			Name:     "regex_movies",
-			Help:     `Regex used to classify torrents as movies.`,
-			Advanced: true,
-			Default:  `(?i)(19|20)([0-9]{2} ?\.?)`,
-		}, {
 			Name:     "bypass_cache",
 			Help:     "Ask TorBox for fresh torrent list data instead of cached data.",
 			Advanced: true,
@@ -85,9 +69,6 @@ func init() {
 // Options defines the configuration for this backend.
 type Options struct {
 	APIKey      string               `config:"api_key"`
-	FolderMode  string               `config:"folder_mode"`
-	RegexShows  string               `config:"regex_shows"`
-	RegexMovie  string               `config:"regex_movies"`
 	BypassCache bool                 `config:"bypass_cache"`
 	Enc         encoder.MultiEncoder `config:"encoding"`
 }
@@ -346,12 +327,9 @@ func (f *Fs) refresh(ctx context.Context) error {
 		}
 	}
 
-	if f.opt.FolderMode == "folders" {
-		now := time.Now()
-		addDir("shows", now)
-		addDir("movies", now)
-		addDir("default", now)
-	}
+	now := time.Now()
+	addDir(string(sourceTorrent), now)
+	addDir(string(sourceUsenet), now)
 
 	for _, list := range lists {
 		for _, transfer := range list.items {
@@ -359,17 +337,14 @@ func (f *Fs) refresh(ctx context.Context) error {
 				continue
 			}
 			modTime := parseTime(transfer.CachedAt, transfer.UpdatedAt, transfer.CreatedAt)
-			category := f.category(transfer.Name)
 			transferName := cleanSegment(f.opt.Enc.ToStandardName(transfer.Name))
 			if transferName == "" {
 				transferName = strconv.Itoa(transfer.ID)
 			}
 
-			baseDir := ""
-			if f.opt.FolderMode == "folders" {
-				addDir(category, modTime)
-				baseDir = uniqueDir(dirs, path.Join(category, transferName), list.source, transfer.ID, modTime)
-			}
+			sourceDir := string(list.source)
+			addDir(sourceDir, modTime)
+			baseDir := uniqueDir(dirs, path.Join(sourceDir, transferName), list.source, transfer.ID, modTime)
 
 			for _, file := range transfer.Files {
 				fileRemote := cleanFilePath(file, transfer.Name, transfer.Hash)
@@ -377,9 +352,7 @@ func (f *Fs) refresh(ctx context.Context) error {
 					fileRemote = file.Name
 				}
 				fileRemote = encodePath(f.opt.Enc, fileRemote)
-				if f.opt.FolderMode == "folders" {
-					fileRemote = path.Join(baseDir, fileRemote)
-				}
+				fileRemote = path.Join(baseDir, fileRemote)
 				fileRemote = uniqueFile(files, fileRemote, list.source, transfer.ID, file.ID)
 				parent := path.Dir(fileRemote)
 				if parent != "." {
@@ -428,20 +401,6 @@ func parseTime(values ...string) time.Time {
 		}
 	}
 	return time.Now()
-}
-
-func (f *Fs) category(name string) string {
-	showRe, showErr := regexp.Compile(f.opt.RegexShows)
-	movieRe, movieErr := regexp.Compile(f.opt.RegexMovie)
-	isShow := showErr == nil && showRe.MatchString(name)
-	isMovie := movieErr == nil && movieRe.MatchString(name)
-	if isShow {
-		return "shows"
-	}
-	if isMovie {
-		return "movies"
-	}
-	return "default"
 }
 
 func cleanFilePath(file api.File, torrentName, torrentHash string) string {
@@ -579,11 +538,9 @@ func (f *Fs) shouldRefreshForDir(actualDir string) bool {
 	if cacheDuration <= 0 || time.Since(cacheTime) < cacheDuration {
 		return false
 	}
-	if f.opt.FolderMode == "folders" {
-		switch actualDir {
-		case "shows", "movies", "default":
-			return true
-		}
+	switch actualDir {
+	case string(sourceTorrent), string(sourceUsenet):
+		return true
 	}
 	return false
 }
