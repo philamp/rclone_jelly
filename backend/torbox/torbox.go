@@ -92,29 +92,31 @@ type Fs struct {
 
 // Object describes a TorBox file.
 type Object struct {
-	fs          *Fs
-	remote      string
-	hasMetaData bool
-	size        int64
-	modTime     time.Time
-	id          string
-	mimeType    string
-	source      sourceType
-	transferID  int
-	fileID      int
+	fs           *Fs
+	remote       string
+	hasMetaData  bool
+	size         int64
+	modTime      time.Time
+	id           string
+	mimeType     string
+	source       sourceType
+	transferID   int
+	fileID       int
+	transferRoot string
 }
 
 type entry struct {
-	remote     string
-	name       string
-	isDir      bool
-	id         string
-	size       int64
-	modTime    time.Time
-	mimeType   string
-	source     sourceType
-	transferID int
-	fileID     int
+	remote       string
+	name         string
+	isDir        bool
+	id           string
+	size         int64
+	modTime      time.Time
+	mimeType     string
+	source       sourceType
+	transferID   int
+	fileID       int
+	transferRoot string
 }
 
 type sourceType string
@@ -359,15 +361,16 @@ func (f *Fs) refresh(ctx context.Context) error {
 					addDir(parent, modTime)
 				}
 				files[fileRemote] = &entry{
-					remote:     fileRemote,
-					name:       path.Base(fileRemote),
-					id:         fmt.Sprintf("%s:%d:%d", list.source, transfer.ID, file.ID),
-					size:       file.Size,
-					modTime:    modTime,
-					mimeType:   file.MimeType,
-					source:     list.source,
-					transferID: transfer.ID,
-					fileID:     file.ID,
+					remote:       fileRemote,
+					name:         path.Base(fileRemote),
+					id:           fmt.Sprintf("%s:%d:%d", list.source, transfer.ID, file.ID),
+					size:         file.Size,
+					modTime:      modTime,
+					mimeType:     file.MimeType,
+					source:       list.source,
+					transferID:   transfer.ID,
+					fileID:       file.ID,
+					transferRoot: baseDir,
 				}
 			}
 		}
@@ -693,6 +696,7 @@ func (o *Object) setMetaData(info *entry) error {
 	o.source = info.source
 	o.transferID = info.transferID
 	o.fileID = info.fileID
+	o.transferRoot = info.transferRoot
 	return nil
 }
 
@@ -705,14 +709,15 @@ func (o *Object) readMetaData(ctx context.Context) error {
 		return err
 	}
 	return o.setMetaData(&entry{
-		remote:     obj.Remote(),
-		size:       obj.Size(),
-		modTime:    obj.ModTime(ctx),
-		source:     obj.(*Object).source,
-		transferID: obj.(*Object).transferID,
-		fileID:     obj.(*Object).fileID,
-		mimeType:   obj.(*Object).mimeType,
-		id:         obj.(*Object).id,
+		remote:       obj.Remote(),
+		size:         obj.Size(),
+		modTime:      obj.ModTime(ctx),
+		source:       obj.(*Object).source,
+		transferID:   obj.(*Object).transferID,
+		fileID:       obj.(*Object).fileID,
+		transferRoot: obj.(*Object).transferRoot,
+		mimeType:     obj.(*Object).mimeType,
+		id:           obj.(*Object).id,
 	})
 }
 
@@ -745,6 +750,60 @@ func (f *Fs) clearDownloadURL(key string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.dlURLs, key)
+}
+
+func (f *Fs) deleteTransfer(ctx context.Context, source sourceType, transferID int) error {
+	deletePath := "/torrents/delete/" + strconv.Itoa(transferID)
+	if source == sourceUsenet {
+		deletePath = "/usenet/delete/" + strconv.Itoa(transferID)
+	}
+	opts := rest.Opts{
+		Method:     "DELETE",
+		Path:       deletePath,
+		NoResponse: true,
+	}
+	var resp *http.Response
+	var err error
+	fs.Debugf(f, "TorBox API call: DELETE %s source=%s transfer_id=%d", deletePath, source, transferID)
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.Call(ctx, &opts)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		fs.Debugf(f, "TorBox API error: DELETE %s source=%s transfer_id=%d: %v", deletePath, source, transferID, err)
+		return err
+	}
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
+	}
+	fs.Debugf(f, "TorBox API response: DELETE %s status=%d source=%s transfer_id=%d", deletePath, status, source, transferID)
+	return nil
+}
+
+func (f *Fs) pruneTransferFromCache(source sourceType, transferID int, transferRoot string) {
+	transferRoot = strings.Trim(transferRoot, "/")
+	downloadKeyPrefix := fmt.Sprintf("%s:%d:", source, transferID)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for remote, info := range f.files {
+		if info.source == source && info.transferID == transferID {
+			delete(f.files, remote)
+		}
+	}
+	if transferRoot != "" {
+		for remote := range f.dirs {
+			if remote == transferRoot || strings.HasPrefix(remote, transferRoot+"/") {
+				delete(f.dirs, remote)
+			}
+		}
+	}
+	for key := range f.dlURLs {
+		if strings.HasPrefix(key, downloadKeyPrefix) {
+			delete(f.dlURLs, key)
+		}
+	}
 }
 
 func (o *Object) downloadRequest() (string, url.Values, error) {
@@ -888,8 +947,23 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	return errReadOnly
 }
 
-// Remove is unsupported on read-only TorBox remotes.
-func (o *Object) Remove(ctx context.Context) error { return errReadOnly }
+// Remove deletes the whole TorBox transfer that contains this object.
+func (o *Object) Remove(ctx context.Context) error {
+	err := o.readMetaData(ctx)
+	if err != nil {
+		return fmt.Errorf("Remove: failed to read metadata: %w", err)
+	}
+	if o.transferID == 0 {
+		return errors.New("can't delete - missing transfer ID")
+	}
+	fs.Debugf(o, "Deleting containing TorBox transfer: source=%s transfer_id=%d file_id=%d", o.source, o.transferID, o.fileID)
+	err = o.fs.deleteTransfer(ctx, o.source, o.transferID)
+	if err != nil {
+		return err
+	}
+	o.fs.pruneTransferFromCache(o.source, o.transferID, o.transferRoot)
+	return nil
+}
 
 // MimeType of an Object if known.
 func (o *Object) MimeType(ctx context.Context) string { return o.mimeType }
