@@ -753,31 +753,41 @@ func (f *Fs) clearDownloadURL(key string) {
 }
 
 func (f *Fs) deleteTransfer(ctx context.Context, source sourceType, transferID int) error {
-	deletePath := "/torrents/delete/" + strconv.Itoa(transferID)
+	deletePath := "/torrents/controltorrent"
+	request := map[string]any{
+		"torrent_id": transferID,
+		"operation":  "delete",
+		"all":        false,
+	}
 	if source == sourceUsenet {
-		deletePath = "/usenet/delete/" + strconv.Itoa(transferID)
+		deletePath = "/usenet/controlusenetdownload"
+		request = map[string]any{
+			"usenet_id": transferID,
+			"operation": "delete",
+			"all":       false,
+		}
 	}
 	opts := rest.Opts{
-		Method:     "DELETE",
-		Path:       deletePath,
-		NoResponse: true,
+		Method: "POST",
+		Path:   deletePath,
 	}
 	var resp *http.Response
+	var result map[string]any
 	var err error
-	fs.Debugf(f, "TorBox API call: DELETE %s source=%s transfer_id=%d", deletePath, source, transferID)
+	fs.Debugf(f, "TorBox API call: POST %s operation=delete source=%s transfer_id=%d", deletePath, source, transferID)
 	err = f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.Call(ctx, &opts)
+		resp, err = f.srv.CallJSON(ctx, &opts, request, &result)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		fs.Debugf(f, "TorBox API error: DELETE %s source=%s transfer_id=%d: %v", deletePath, source, transferID, err)
+		fs.Debugf(f, "TorBox API error: POST %s operation=delete source=%s transfer_id=%d: %v", deletePath, source, transferID, err)
 		return err
 	}
 	status := 0
 	if resp != nil {
 		status = resp.StatusCode
 	}
-	fs.Debugf(f, "TorBox API response: DELETE %s status=%d source=%s transfer_id=%d", deletePath, status, source, transferID)
+	fs.Debugf(f, "TorBox API response: POST %s operation=delete status=%d source=%s transfer_id=%d", deletePath, status, source, transferID)
 	return nil
 }
 
