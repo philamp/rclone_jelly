@@ -383,15 +383,10 @@ func (f *Fs) refresh(ctx context.Context) error {
 }
 
 func transferReady(t api.Transfer) bool {
-	if t.DownloadFinished {
+	if t.DownloadPresent {
 		return true
 	}
-	switch strings.ToLower(t.DownloadState) {
-	case "completed":
-		return true
-	default:
-		return false
-	}
+	return false
 }
 
 func parseTime(values ...string) time.Time {
