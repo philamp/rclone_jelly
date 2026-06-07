@@ -35,6 +35,7 @@ const (
 	decayConstant = 2
 	rootURL       = "https://api.torbox.app/v1/api"
 	cacheDuration = 10 * time.Second
+	requestdlGap  = 500 * time.Millisecond
 )
 
 var errReadOnly = errors.New("torbox remotes are read only")
@@ -88,6 +89,9 @@ type Fs struct {
 	dirs      map[string]*entry
 	files     map[string]*entry
 	dlURLs    map[string]string
+
+	requestdlMu   sync.Mutex
+	lastRequestdl time.Time
 }
 
 // Object describes a TorBox file.
@@ -747,6 +751,27 @@ func (f *Fs) clearDownloadURL(key string) {
 	delete(f.dlURLs, key)
 }
 
+func (f *Fs) waitRequestdlThrottle(ctx context.Context) error {
+	f.requestdlMu.Lock()
+	defer f.requestdlMu.Unlock()
+
+	wait := time.Until(f.lastRequestdl.Add(requestdlGap))
+	if wait > 0 {
+		fs.Debugf(f, "TorBox requestdl throttle: waiting %v", wait)
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		}
+	}
+	f.lastRequestdl = time.Now()
+	return nil
+}
+
 func (f *Fs) deleteTransfer(ctx context.Context, source sourceType, transferID int) error {
 	deletePath := "/torrents/controltorrent"
 	request := map[string]any{
@@ -834,6 +859,10 @@ func (o *Object) downloadRequest() (string, url.Values, error) {
 
 func (o *Object) requestDownloadURL(ctx context.Context) (string, error) {
 	requestPath, params, err := o.downloadRequest()
+	if err != nil {
+		return "", err
+	}
+	err = o.fs.waitRequestdlThrottle(ctx)
 	if err != nil {
 		return "", err
 	}
