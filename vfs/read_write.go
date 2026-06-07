@@ -184,7 +184,7 @@ func (fh *RWFileHandle) openPending() (err error) {
 // openPending opens the file if there is a pending open
 // call with the lock held
 func (fh *RWFileHandle) openPendingSource() (err error) {
-	if fh.opened {
+	if fh.openedSource && fh.r != nil {
 		return nil
 	}
 	o := fh.file.getObject()
@@ -539,6 +539,9 @@ func (fh *RWFileHandle) seek(offset int64, reopen bool) (err error) {
 	if fh.noSeek {
 		return ESPIPE
 	}
+	if fh.r == nil {
+		return errors.New("read source is not open")
+	}
 	fh.hash = nil
 	if !reopen {
 		ar := fh.r.GetAsyncReader()
@@ -595,6 +598,9 @@ func (fh *RWFileHandle) readAtSource(p []byte, off int64) (n int, err error) {
 	err = fh.openPendingSource() // FIXME pending open could be more efficient in the presence of seek (and retries)
 	if err != nil {
 		return 0, err
+	}
+	if fh.r == nil {
+		return 0, errors.New("read source is not open")
 	}
 	// fs.Debugf(fh.remote, "ReadFileHandle.Read size %d offset %d", reqSize, off)
 	if fh.closed {
