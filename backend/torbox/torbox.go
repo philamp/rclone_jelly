@@ -848,7 +848,12 @@ func (o *Object) requestDownloadURL(ctx context.Context) (string, error) {
 	fs.Debugf(o, "TorBox API call: GET %s source=%s transfer_id=%d file_id=%d", requestPath, o.source, o.transferID, o.fileID)
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = o.fs.srv.Call(ctx, &opts)
-		return shouldRetry(ctx, resp, err)
+		retry, retryErr := shouldRetry(ctx, resp, err)
+		if retry && resp != nil {
+			fs.Debugf(o, "TorBox API retryable response: GET %s status=%d source=%s transfer_id=%d file_id=%d", requestPath, resp.StatusCode, o.source, o.transferID, o.fileID)
+			_, _ = rest.ReadBody(resp)
+		}
+		return retry, retryErr
 	})
 	if err != nil {
 		fs.Debugf(o, "TorBox API error: GET %s source=%s transfer_id=%d file_id=%d: %v", requestPath, o.source, o.transferID, o.fileID, err)
