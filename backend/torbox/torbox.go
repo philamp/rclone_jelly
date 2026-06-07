@@ -30,12 +30,19 @@ import (
 )
 
 const (
-	minSleep      = 200 * time.Millisecond
-	maxSleep      = 5 * time.Second
-	decayConstant = 2
-	rootURL       = "https://api.torbox.app/v1/api"
-	cacheDuration = 10 * time.Second
-	requestdlGap  = 2 * time.Second
+	minSleep           = 200 * time.Millisecond
+	maxSleep           = 5 * time.Second
+	decayConstant      = 2
+	rootURL            = "https://api.torbox.app/v1/api"
+	cacheDuration      = 10 * time.Second
+	requestdlMinSleep  = 500 * time.Millisecond
+	requestdlMaxSleep  = 30 * time.Second
+	requestdlWindow    = time.Minute
+	requestdlMidCount  = 10
+	requestdlSlowCount = 15
+	requestdlFastGap   = 500 * time.Millisecond
+	requestdlMidGap    = 2 * time.Second
+	requestdlSlowGap   = 3 * time.Second
 )
 
 var errReadOnly = errors.New("torbox remotes are read only")
@@ -76,13 +83,14 @@ type Options struct {
 
 // Fs represents a TorBox remote.
 type Fs struct {
-	name     string
-	root     string
-	opt      Options
-	features *fs.Features
-	srv      *rest.Client
-	dlSrv    *rest.Client
-	pacer    *fs.Pacer
+	name           string
+	root           string
+	opt            Options
+	features       *fs.Features
+	srv            *rest.Client
+	dlSrv          *rest.Client
+	pacer          *fs.Pacer
+	requestdlPacer *fs.Pacer
 
 	mu        sync.Mutex
 	cacheTime time.Time
@@ -90,8 +98,9 @@ type Fs struct {
 	files     map[string]*entry
 	dlURLs    map[string]string
 
-	requestdlMu   sync.Mutex
-	lastRequestdl time.Time
+	requestdlWindowMu sync.Mutex
+	requestdlCalls    []time.Time
+	lastRequestdl     time.Time
 }
 
 // Object describes a TorBox file.
@@ -208,15 +217,16 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	srv.SetErrorHandler(errorHandler)
 
 	f := &Fs{
-		name:   name,
-		root:   root,
-		opt:    *opt,
-		srv:    srv,
-		dlSrv:  rest.NewClient(client),
-		pacer:  fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
-		dirs:   make(map[string]*entry),
-		files:  make(map[string]*entry),
-		dlURLs: make(map[string]string),
+		name:           name,
+		root:           root,
+		opt:            *opt,
+		srv:            srv,
+		dlSrv:          rest.NewClient(client),
+		pacer:          fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+		requestdlPacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(requestdlMinSleep), pacer.MaxSleep(requestdlMaxSleep), pacer.DecayConstant(decayConstant))),
+		dirs:           make(map[string]*entry),
+		files:          make(map[string]*entry),
+		dlURLs:         make(map[string]string),
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,
@@ -751,25 +761,55 @@ func (f *Fs) clearDownloadURL(key string) {
 	delete(f.dlURLs, key)
 }
 
-func (f *Fs) waitRequestdlThrottle(ctx context.Context) error {
-	f.requestdlMu.Lock()
-	defer f.requestdlMu.Unlock()
+func requestdlGapForCount(count int) time.Duration {
+	switch {
+	case count >= requestdlSlowCount:
+		return requestdlSlowGap
+	case count >= requestdlMidCount:
+		return requestdlMidGap
+	default:
+		return requestdlFastGap
+	}
+}
 
-	wait := time.Until(f.lastRequestdl.Add(requestdlGap))
-	if wait > 0 {
-		fs.Debugf(f, "TorBox requestdl throttle: waiting %v", wait)
+func (f *Fs) waitRequestdlWindow(ctx context.Context) error {
+	f.requestdlWindowMu.Lock()
+	defer f.requestdlWindowMu.Unlock()
+
+	for {
+		now := time.Now()
+		cutoff := now.Add(-requestdlWindow)
+		kept := f.requestdlCalls[:0]
+		for _, callTime := range f.requestdlCalls {
+			if callTime.After(cutoff) {
+				kept = append(kept, callTime)
+			}
+		}
+		f.requestdlCalls = kept
+
+		gap := requestdlGapForCount(len(f.requestdlCalls))
+		wait := time.Until(f.lastRequestdl.Add(gap))
+		if wait <= 0 {
+			f.lastRequestdl = now
+			f.requestdlCalls = append(f.requestdlCalls, now)
+			fs.Debugf(f, "TorBox requestdl window: calls_last_minute=%d next_gap=%v", len(f.requestdlCalls), requestdlGapForCount(len(f.requestdlCalls)))
+			return nil
+		}
+
+		fs.Debugf(f, "TorBox requestdl window: waiting %v calls_last_minute=%d gap=%v", wait, len(f.requestdlCalls), gap)
 		timer := time.NewTimer(wait)
 		select {
 		case <-timer.C:
 		case <-ctx.Done():
 			if !timer.Stop() {
-				<-timer.C
+				select {
+				case <-timer.C:
+				default:
+				}
 			}
 			return ctx.Err()
 		}
 	}
-	f.lastRequestdl = time.Now()
-	return nil
 }
 
 func (f *Fs) deleteTransfer(ctx context.Context, source sourceType, transferID int) error {
@@ -862,10 +902,6 @@ func (o *Object) requestDownloadURL(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	err = o.fs.waitRequestdlThrottle(ctx)
-	if err != nil {
-		return "", err
-	}
 	opts := rest.Opts{
 		Method:       "GET",
 		Path:         requestPath,
@@ -875,7 +911,11 @@ func (o *Object) requestDownloadURL(ctx context.Context) (string, error) {
 	}
 	var resp *http.Response
 	fs.Debugf(o, "TorBox API call: GET %s source=%s transfer_id=%d file_id=%d", requestPath, o.source, o.transferID, o.fileID)
-	err = o.fs.pacer.Call(func() (bool, error) {
+	err = o.fs.requestdlPacer.Call(func() (bool, error) {
+		err = o.fs.waitRequestdlWindow(ctx)
+		if err != nil {
+			return false, err
+		}
 		resp, err = o.fs.srv.Call(ctx, &opts)
 		retry, retryErr := shouldRetry(ctx, resp, err)
 		if retry && resp != nil {
