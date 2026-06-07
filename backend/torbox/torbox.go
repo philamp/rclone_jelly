@@ -848,7 +848,7 @@ func (o *Object) downloadRequest() (string, url.Values, error) {
 		return "", nil, fmt.Errorf("can't download - unknown source %q", o.source)
 	}
 	params.Set("file_id", strconv.Itoa(o.fileID))
-	params.Set("redirect", "true")
+	params.Set("redirect", "false")
 	params.Set("append_name", "true")
 	requestPath := "/torrents/requestdl"
 	if o.source == sourceUsenet {
@@ -867,20 +867,21 @@ func (o *Object) requestDownloadURL(ctx context.Context) (string, error) {
 		return "", err
 	}
 	opts := rest.Opts{
-		Method:       "GET",
-		Path:         requestPath,
-		Parameters:   params,
-		NoRedirect:   true,
-		IgnoreStatus: true,
+		Method:     "GET",
+		Path:       requestPath,
+		Parameters: params,
 	}
 	var resp *http.Response
+	var result struct {
+		api.Response
+		Data string `json:"data"`
+	}
 	fs.Debugf(o, "TorBox API call: GET %s source=%s transfer_id=%d file_id=%d", requestPath, o.source, o.transferID, o.fileID)
 	err = o.fs.pacer.Call(func() (bool, error) {
-		resp, err = o.fs.srv.Call(ctx, &opts)
+		resp, err = o.fs.srv.CallJSON(ctx, &opts, nil, &result)
 		retry, retryErr := shouldRetry(ctx, resp, err)
 		if retry && resp != nil {
 			fs.Debugf(o, "TorBox API retryable response: GET %s status=%d source=%s transfer_id=%d file_id=%d", requestPath, resp.StatusCode, o.source, o.transferID, o.fileID)
-			_, _ = rest.ReadBody(resp)
 		}
 		return retry, retryErr
 	})
@@ -892,29 +893,7 @@ func (o *Object) requestDownloadURL(ctx context.Context) (string, error) {
 		return "", errors.New("requestdl returned no response")
 	}
 	fs.Debugf(o, "TorBox API response: GET %s status=%d source=%s transfer_id=%d file_id=%d", requestPath, resp.StatusCode, o.source, o.transferID, o.fileID)
-	if resp.StatusCode >= 300 && resp.StatusCode <= 399 {
-		defer fs.CheckClose(resp.Body, &err)
-		location := resp.Header.Get("Location")
-		if location == "" {
-			return "", fmt.Errorf("requestdl returned %s without Location header", resp.Status)
-		}
-		locationURL, err := url.Parse(location)
-		if err != nil {
-			return "", err
-		}
-		downloadURL := resp.Request.URL.ResolveReference(locationURL).String()
-		fs.Debugf(o, "TorBox requestdl URL resolved: %s", redactedURL(downloadURL))
-		return downloadURL, nil
-	}
-	body, readErr := rest.ReadBody(resp)
-	if readErr != nil {
-		return "", readErr
-	}
-	var result struct {
-		api.Response
-		Data string `json:"data"`
-	}
-	if err = json.Unmarshal(body, &result); err == nil && result.Data != "" {
+	if result.Data != "" {
 		fs.Debugf(o, "TorBox requestdl URL returned: %s", redactedURL(result.Data))
 		return result.Data, nil
 	}
