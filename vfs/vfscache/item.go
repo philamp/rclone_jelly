@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
-	"path/filepath"
 	//"strings"
 
 	"github.com/rclone/rclone/fs"
@@ -73,9 +73,9 @@ type Item struct {
 	graceTimer      *time.Timer              // timer for delayed close after grace period
 
 	// jellygrail custom
-	lastCheckTime    time.Time               // last time check was done on fs
-    	allowDirectRead       bool                    // when file exists, allowDirectRead is True
-	
+	lastCheckTime   time.Time // last time check was done on fs
+	allowDirectRead bool      // when file exists, allowDirectRead is True
+
 }
 
 // Info is persisted to backing store
@@ -104,10 +104,11 @@ const (
 	ResetFailed                             // Reset failed with an error
 	ResetComplete                           // Reset completed successfully
 )
+
 var (
 	ErrWriteSkipped = errors.New("write skipped due to allowWrite flag")
 )
-	
+
 func (rr ResetResult) String() string {
 	return [...]string{"Dirty item skipped", "In-access item skipped", "Empty item skipped",
 		"Grace period item skipped", "Not-in-use item removed", "Item reset failed", "Item reset completed"}[rr]
@@ -892,7 +893,7 @@ func (item *Item) _checkObject(o fs.Object) error {
 			if remoteFingerprint != item.info.Fingerprint {
 				if !item.info.Dirty {
 					fs.Debugf(item.name, "vfs cache: JGCUSTOM : -NOT- removing cached entry as stale (remote fingerprint %q != cached fingerprint %q)", remoteFingerprint, item.info.Fingerprint)
-					// item._remove("stale (remote is different)") jellygrail custom : sometimes this is triggered by error, maybe the fingerprint returned by the remote is wrong and thus the cache is deleted. 
+					// item._remove("stale (remote is different)") jellygrail custom : sometimes this is triggered by error, maybe the fingerprint returned by the remote is wrong and thus the cache is deleted.
 					// We dont need to delete the cache in this fork as files are RO and don't change
 					item.info.Fingerprint = remoteFingerprint
 				} else {
@@ -1326,12 +1327,12 @@ func (item *Item) GetModTime() (modTime time.Time, err error) {
 }
 
 // jellygrail Getters
-func (item *Item) GetInfoRsPresent(offset int64, size int64) bool{
+func (item *Item) GetInfoRsPresent(offset int64, size int64) bool {
 	item.mu.Lock()
 	defer item.mu.Unlock()
 
 	r := ranges.Range{Pos: offset, Size: size}
-	
+
 	return item.info.Rs.Present(r)
 }
 
@@ -1381,7 +1382,7 @@ func (item *Item) readAt(b []byte, off int64, DirectReadModeROCache bool) (n int
 		if err != nil {
 			return 0, err
 		}
-	}else{
+	} else {
 		// fs.Debugf("### item.go readAt CALLED / DYN-MODE RO-CACHE or FULL-MODE RO-CACHE confirmed ### %s", "")
 	}
 
@@ -1396,7 +1397,7 @@ func (item *Item) readAt(b []byte, off int64, DirectReadModeROCache bool) (n int
 
 	item.info.ATime = time.Now()
 	// Do the reading with Item.mu unlocked and cache protected by preAccess
-	
+
 	n, err = item.fd.ReadAt(b, off)
 	return n, err
 }
@@ -1444,24 +1445,23 @@ func (item *Item) WriteAt(b []byte, off int64) (n int, err error) {
 // TODO : if allowDirectRead is true, check deeper if we need to be in source mode or in cache mode (in the calling function ? by checking if offset requested is within downloaded ranges, if so, switch in cache mode)
 
 func (item *Item) AllowDirectReadUpdate() bool {
-	cacheDonePath := "/Cache_Check_Video_Library/cache_check/remote_realdebrid"
+	cacheDonePath := filepath.Join("/Cache_Check_Video_Library/cache_check", item.c.fremote.Name())
 
 	// Extensions that directly triggers direct-read, TODO-jellygrail : take these allowed extensions from general config
-	// so in the end, every file are RW cached at some point but : 
+	// so in the end, every file are RW cached at some point but :
 	// - video files are never RW-cached so are direct-read eventually
 	// - rar files are first RW-cached then RO-cached/direct-read thank to the flag provided by python script
-	// - all other files (srt etc...) are always RW-cached (decrease the number of request for non-rar torrents as well) 
+	// - all other files (srt etc...) are always RW-cached (decrease the number of request for non-rar torrents as well)
 	// below table must be complete enough to avoid having video files RW-cached
-	// allowedExtensions := []string{".mkv", ".avi", ".mp4", ".mov", ".m2ts", ".ts", ".m4v", ".wmv", ".vob", ".mpg"} 
+	// allowedExtensions := []string{".mkv", ".avi", ".mp4", ".mov", ".m2ts", ".ts", ".m4v", ".wmv", ".vob", ".mpg"}
 
 	// Vérifier si item.name se termine par une des extensions autorisées
 	// for _, ext := range allowedExtensions {
-		// if strings.HasSuffix(item.name, ext) {
-			// item.allowDirectRead = true
-			// return true
-		// }
+	// if strings.HasSuffix(item.name, ext) {
+	// item.allowDirectRead = true
+	// return true
 	// }
-
+	// }
 
 	// Check if we should recheck the file presence, i.e.,
 	// if it hasn't been checked yet or if it's been over 3 seconds since the last check
@@ -1483,7 +1483,6 @@ func (item *Item) AllowDirectReadUpdate() bool {
 	return item.allowDirectRead
 }
 
-
 // WriteAtNoOverwrite writes b to the file, but will not overwrite
 // already present ranges.
 //
@@ -1492,14 +1491,13 @@ func (item *Item) AllowDirectReadUpdate() bool {
 // It returns n the total bytes processed and skipped the number of
 // bytes which were processed but not actually written to the file.
 func (item *Item) WriteAtNoOverwrite(b []byte, off int64) (n int, skipped int, err error) {
-	
+
 	// If the file check disallows writing, return without writing
-	// solution removed in favor of the below solution 
+	// solution removed in favor of the below solution
 	// if !item.allowWrite {
-		// return 0, 0, ErrWriteSkipped
+	// return 0, 0, ErrWriteSkipped
 	// }
 
-	
 	item.mu.Lock()
 
 	var (
@@ -1530,15 +1528,14 @@ func (item *Item) WriteAtNoOverwrite(b []byte, off int64) (n int, skipped int, e
 			// if range not present then we want to write it
 			// fs.Debugf(item.name, "write chunk offset=%d size=%d", off, size)
 			// better solution to avoid writting ?
-			
+
 			nn, err = item.fd.WriteAt(b[:size], off)
 			if err == nil && nn != size {
 				err = fmt.Errorf("downloader: short write: tried to write %d but only %d written", size, nn)
 			}
-			
+
 			item._written(off, int64(nn))
-			
-			
+
 		}
 		off += int64(nn)
 		b = b[nn:]
