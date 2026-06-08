@@ -367,6 +367,10 @@ func (f *Fs) refresh(ctx context.Context) error {
 				if fileRemote == "" {
 					fileRemote = file.Name
 				}
+				if ignoreListedFile(fileRemote) {
+					fs.Debugf(f, "Ignoring TorBox support file from mylist: %s", fileRemote)
+					continue
+				}
 				fileRemote = encodePath(f.opt.Enc, fileRemote)
 				fileRemote = path.Join(baseDir, fileRemote)
 				fileRemote = uniqueFile(files, fileRemote, list.source, transfer.ID, file.ID)
@@ -433,6 +437,14 @@ func cleanFilePath(file api.File, torrentName, torrentHash string) string {
 		value = file.ShortName
 	}
 	return value
+}
+
+func ignoreListedFile(remote string) bool {
+	switch strings.ToLower(path.Ext(remote)) {
+	case ".nzb", ".par", ".par2":
+		return true
+	}
+	return false
 }
 
 func stripPathAfterSegment(value, segment string) string {
