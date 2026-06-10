@@ -35,14 +35,14 @@ const (
 	decayConstant      = 2
 	rootURL            = "https://api.torbox.app/v1/api"
 	cacheDuration      = 10 * time.Second
-	requestdlMinSleep  = 500 * time.Millisecond
+	requestdlMinSleep  = 251 * time.Millisecond
 	requestdlMaxSleep  = 30 * time.Second
 	requestdlWindow    = time.Minute
 	requestdlMidCount  = 10
 	requestdlSlowCount = 15
 	requestdlFastGap   = 500 * time.Millisecond
 	requestdlMidGap    = 2 * time.Second
-	requestdlSlowGap   = 3 * time.Second
+	requestdlSlowGap   = 5 * time.Second
 )
 
 var errReadOnly = errors.New("torbox remotes are read only")
