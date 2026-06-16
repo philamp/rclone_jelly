@@ -39,6 +39,7 @@ const (
 	decayConstant    = 2
 	rootURL          = "https://www.premiumize.me/api"
 	cacheDuration    = 10 * time.Second
+	checkDuration    = 48 * time.Hour
 	rateLimitBackoff = 5 * time.Second
 	sourceTorrent    = "torrent"
 	statusFinished   = "finished"
@@ -91,6 +92,9 @@ type Fs struct {
 	dirs      map[string]*entry
 	files     map[string]*entry
 	stored    map[string]storedTransfer
+
+	transferChecks map[string]transferCheck
+	folderCache    map[string]cachedFolder
 }
 
 // Object describes a Premiumize file.
@@ -111,6 +115,25 @@ type Object struct {
 	contentPath    string
 }
 
+type transferCheck struct {
+	checkedAt     time.Time
+	src           string
+	cacheHit      bool
+	skipCheck     bool
+	skipPermanent bool
+}
+
+type transferSourceInfo struct {
+	src        string
+	sourceType string
+}
+
+type cachedFolder struct {
+	loadedAt time.Time
+	content  []api.Item
+	file     *api.Item
+}
+
 type entry struct {
 	remote         string
 	name           string
@@ -126,6 +149,7 @@ type entry struct {
 	transferDirID  string
 	transferSrc    string
 	contentPath    string
+	folderID       string
 }
 
 type storedTransfer struct {
@@ -227,16 +251,18 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	srv.SetErrorHandler(errorHandler)
 
 	f := &Fs{
-		name:      name,
-		root:      root,
-		opt:       *opt,
-		srv:       srv,
-		dlSrv:     rest.NewClient(client),
-		pacer:     fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
-		storePath: premiumizeStorePath(name, root),
-		dirs:      make(map[string]*entry),
-		files:     make(map[string]*entry),
-		stored:    make(map[string]storedTransfer),
+		name:           name,
+		root:           root,
+		opt:            *opt,
+		srv:            srv,
+		dlSrv:          rest.NewClient(client),
+		pacer:          fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+		storePath:      premiumizeStorePath(name, root),
+		dirs:           make(map[string]*entry),
+		files:          make(map[string]*entry),
+		stored:         make(map[string]storedTransfer),
+		transferChecks: make(map[string]transferCheck),
+		folderCache:    make(map[string]cachedFolder),
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,
@@ -455,7 +481,7 @@ func (f *Fs) cacheCheck(ctx context.Context, src string) (bool, error) {
 	return hit, nil
 }
 
-func (f *Fs) transferSource(ctx context.Context, transfer api.Transfer) (string, error) {
+func (f *Fs) transferSource(ctx context.Context, transfer api.Transfer) (transferSourceInfo, error) {
 	params := url.Values{}
 	params.Set("id", transfer.ID)
 	opts := rest.Opts{
@@ -470,16 +496,16 @@ func (f *Fs) transferSource(ctx context.Context, transfer api.Transfer) (string,
 		fs.Debugf(f, "Premiumize API error: POST /transfer/source id=%s: %v", transfer.ID, err)
 		if transfer.Src != "" {
 			fs.Debugf(f, "Premiumize transfer/source failed for transfer %s, falling back to transfer/list src", transfer.ID)
-			return transfer.Src, nil
+			return transferSourceInfo{src: transfer.Src}, nil
 		}
-		return "", err
+		return transferSourceInfo{}, err
 	}
 	if result.URL == "" && transfer.Src != "" {
 		fs.Debugf(f, "Premiumize transfer/source returned empty source for transfer %s, falling back to transfer/list src", transfer.ID)
-		return transfer.Src, nil
+		return transferSourceInfo{src: transfer.Src, sourceType: result.Type}, nil
 	}
 	fs.Debugf(f, "Premiumize API response: POST /transfer/source id=%s type=%s has_url=%t", transfer.ID, result.Type, result.URL != "")
-	return result.URL, nil
+	return transferSourceInfo{src: result.URL, sourceType: result.Type}, nil
 }
 
 func (f *Fs) directDL(ctx context.Context, src string) ([]api.DirectDLContent, error) {
@@ -518,6 +544,49 @@ func (f *Fs) createTransfer(ctx context.Context, src string) error {
 	}
 	fs.Debugf(f, "Premiumize API response: POST /transfer/create id=%s", result.ID)
 	return nil
+}
+
+func isUsenetSource(source transferSourceInfo) bool {
+	sourceType := strings.ToLower(strings.TrimSpace(source.sourceType))
+	src := strings.ToLower(strings.TrimSpace(source.src))
+	return sourceType == "file" && (src == "/api/job/src" || strings.HasPrefix(src, "/api/job/src?"))
+}
+
+func (f *Fs) cachedTransferCheck(ctx context.Context, transfer api.Transfer) (src string, cacheHit bool, err error) {
+	if cached, ok := f.transferChecks[transfer.ID]; ok && (cached.skipPermanent || time.Since(cached.checkedAt) < checkDuration) {
+		fs.Debugf(f, "Premiumize transfer check cache hit: transfer_id=%s age=%v hit=%t skip=%t permanent=%t", transfer.ID, time.Since(cached.checkedAt), cached.cacheHit, cached.skipCheck, cached.skipPermanent)
+		return cached.src, cached.cacheHit, nil
+	}
+
+	source, err := f.transferSource(ctx, transfer)
+	if err != nil {
+		return "", false, err
+	}
+	src = source.src
+	if src == "" {
+		return "", false, nil
+	}
+	if isUsenetSource(source) {
+		f.transferChecks[transfer.ID] = transferCheck{
+			checkedAt:     time.Now(),
+			src:           src,
+			skipCheck:     true,
+			skipPermanent: true,
+		}
+		fs.Debugf(f, "Premiumize cache/check skipped for usenet source: transfer_id=%s source_type=%s", transfer.ID, source.sourceType)
+		return src, false, nil
+	}
+	cacheHit, err = f.cacheCheck(ctx, src)
+	if err != nil {
+		return src, false, err
+	}
+
+	f.transferChecks[transfer.ID] = transferCheck{
+		checkedAt: time.Now(),
+		src:       src,
+		cacheHit:  cacheHit,
+	}
+	return src, cacheHit, nil
 }
 
 func (f *Fs) refresh(ctx context.Context) error {
@@ -575,54 +644,33 @@ func (f *Fs) refresh(ctx context.Context) error {
 		baseDir := uniqueDir(dirs, path.Join(sourceTorrent, transferName), transfer.ID, now)
 		transferFileID := transfer.FileID.String()
 		transferDirID := transfer.FolderID.String()
+		dirs[baseDir].transferID = transfer.ID
+		dirs[baseDir].transferRoot = baseDir
+		dirs[baseDir].transferFileID = transferFileID
+		dirs[baseDir].transferDirID = transferDirID
+		dirs[baseDir].folderID = transferDirID
 
-		src, err := f.transferSource(ctx, transfer)
+		src, cacheHit, err := f.cachedTransferCheck(ctx, transfer)
 		if err != nil {
-			fs.Debugf(f, "Premiumize transfer/source failed for transfer %s, falling back to folder data: %v", transfer.ID, err)
+			fs.Debugf(f, "Premiumize transfer check failed for transfer %s, falling back to folder data: %v", transfer.ID, err)
 		}
-		if src != "" {
-			cacheHit, err := f.cacheCheck(ctx, src)
+		if src != "" && cacheHit {
+			content, err := f.directDL(ctx, src)
 			if err != nil {
-				fs.Debugf(f, "Premiumize cache/check failed for transfer %s, falling back to folder data: %v", transfer.ID, err)
-			} else if cacheHit {
-				content, err := f.directDL(ctx, src)
-				if err != nil {
-					fs.Debugf(f, "Premiumize directdl failed for transfer %s, falling back to folder data: %v", transfer.ID, err)
-				} else {
-					err = f.storeDirectDLTransfer(transfer, src, transferFileID, transferDirID, content)
-					if err == nil {
-						err = f.deleteCloudItem(ctx, transferFileID, transferDirID)
-						if err != nil {
-							fs.Debugf(f, "Premiumize cloud cleanup failed for transfer %s, keeping direct links anyway: %v", transfer.ID, err)
-						}
-					} else {
-						fs.Errorf(f, "Premiumize persistent transfer cache failed for transfer %s, keeping cloud item: %v", transfer.ID, err)
+				fs.Debugf(f, "Premiumize directdl failed for transfer %s, falling back to folder data: %v", transfer.ID, err)
+			} else {
+				err = f.storeDirectDLTransfer(transfer, src, transferFileID, transferDirID, content)
+				if err == nil {
+					err = f.deleteCloudItem(ctx, transferFileID, transferDirID)
+					if err != nil {
+						fs.Debugf(f, "Premiumize cloud cleanup failed for transfer %s, keeping direct links anyway: %v", transfer.ID, err)
 					}
-					addDirectDLContent(files, dirs, addDir, f.opt.Enc, baseDir, transfer.Name, content, transfer.ID, baseDir, transferFileID, transferDirID, src)
-					continue
+				} else {
+					fs.Errorf(f, "Premiumize persistent transfer cache failed for transfer %s, keeping cloud item: %v", transfer.ID, err)
 				}
+				addDirectDLContent(files, dirs, addDir, f.opt.Enc, baseDir, transfer.Name, content, transfer.ID, baseDir, transferFileID, transferDirID, src)
+				continue
 			}
-		}
-
-		if transferFileID != "" {
-			item, err := f.itemDetails(ctx, transferFileID)
-			if err != nil {
-				return fmt.Errorf("couldn't read item %s for transfer %s: %w", transferFileID, transfer.ID, err)
-			}
-			fileRemote := encodePath(f.opt.Enc, item.Name)
-			if fileRemote == "" {
-				fileRemote = encodePath(f.opt.Enc, transfer.Name)
-			}
-			addFile(files, dirs, addDir, path.Join(baseDir, fileRemote), item, transfer.ID, baseDir, transferFileID, transferDirID)
-			continue
-		}
-
-		if transferDirID == "" {
-			continue
-		}
-		err = f.addFolderTree(ctx, files, dirs, addDir, baseDir, "", transfer.ID, transferFileID, transferDirID, transferDirID)
-		if err != nil {
-			return fmt.Errorf("couldn't list folder %s for transfer %s: %w", transferDirID, transfer.ID, err)
 		}
 	}
 	f.addStoredTransfers(files, dirs, addDir, liveTransfers)
@@ -786,59 +834,6 @@ func addDirectDLFile(files map[string]*entry, dirs map[string]*entry, addDir fun
 	_ = dirs
 }
 
-func (f *Fs) addFolderTree(ctx context.Context, files map[string]*entry, dirs map[string]*entry, addDir func(string, time.Time, string), baseDir, relDir, transferID, transferFileID, transferDirID, folderID string) error {
-	result, err := f.listFolder(ctx, folderID)
-	if err != nil {
-		return err
-	}
-	parentRemote := path.Join(baseDir, relDir)
-	addDir(parentRemote, time.Now(), folderID)
-	for i := range result.Content {
-		item := &result.Content[i]
-		item.Name = cleanSegment(f.opt.Enc.ToStandardName(item.Name))
-		if item.Name == "" {
-			item.Name = item.ID
-		}
-		childRel := path.Join(relDir, item.Name)
-		childRemote := path.Join(baseDir, childRel)
-		switch item.Type {
-		case api.ItemTypeFolder:
-			addDir(childRemote, itemTime(item), item.ID)
-			err := f.addFolderTree(ctx, files, dirs, addDir, baseDir, childRel, transferID, transferFileID, transferDirID, item.ID)
-			if err != nil {
-				return err
-			}
-		case api.ItemTypeFile:
-			addFile(files, dirs, addDir, childRemote, item, transferID, baseDir, transferFileID, transferDirID)
-		default:
-			fs.Debugf(f, "Ignoring Premiumize item %q - unknown type %q", item.Name, item.Type)
-		}
-	}
-	return nil
-}
-
-func addFile(files map[string]*entry, dirs map[string]*entry, addDir func(string, time.Time, string), remote string, item *api.Item, transferID, transferRoot, transferFileID, transferDirID string) {
-	remote = uniqueFile(files, remote, transferID, item.ID)
-	parent := path.Dir(remote)
-	if parent != "." {
-		addDir(parent, itemTime(item), "")
-	}
-	files[remote] = &entry{
-		remote:         remote,
-		name:           path.Base(remote),
-		id:             item.ID,
-		size:           item.Size,
-		modTime:        itemTime(item),
-		mimeType:       item.MimeType,
-		url:            item.Link,
-		transferID:     transferID,
-		transferRoot:   transferRoot,
-		transferFileID: transferFileID,
-		transferDirID:  transferDirID,
-	}
-	_ = dirs
-}
-
 func transferReady(t api.Transfer) bool {
 	return t.Status == statusFinished || t.Status == statusSeeding
 }
@@ -980,18 +975,178 @@ func (f *Fs) objectFromCache(remote string) (fs.Object, bool, error) {
 	return obj, true, err
 }
 
+func (f *Fs) ensureDirLoaded(ctx context.Context, actualDir string) error {
+	f.mu.Lock()
+	info, ok := f.dirs[actualDir]
+	if !ok {
+		f.mu.Unlock()
+		return fs.ErrorDirNotFound
+	}
+	infoCopy := *info
+	cacheKey := infoCopy.folderID
+	if cacheKey == "" && infoCopy.transferFileID != "" {
+		cacheKey = "file:" + infoCopy.transferFileID
+	}
+	if cacheKey == "" {
+		f.mu.Unlock()
+		return nil
+	}
+	cached, hasCached := f.folderCache[cacheKey]
+	hasChildren := false
+	for remote := range f.dirs {
+		if remote != "" && parentDir(remote) == actualDir {
+			hasChildren = true
+			break
+		}
+	}
+	if !hasChildren {
+		for remote := range f.files {
+			if parentDir(remote) == actualDir {
+				hasChildren = true
+				break
+			}
+		}
+	}
+	if hasCached && hasChildren {
+		f.mu.Unlock()
+		return nil
+	}
+	f.mu.Unlock()
+
+	var singleFile *api.Item
+	var folderContent []api.Item
+	var err error
+	if hasCached {
+		if cached.file != nil {
+			fileCopy := *cached.file
+			singleFile = &fileCopy
+		}
+		folderContent = append(folderContent, cached.content...)
+	} else if infoCopy.folderID != "" {
+		var folder *api.FolderListResponse
+		folder, err = f.listFolder(ctx, infoCopy.folderID)
+		if err != nil {
+			return err
+		}
+		folderContent = append(folderContent, folder.Content...)
+	} else if infoCopy.transferFileID != "" {
+		singleFile, err = f.itemDetails(ctx, infoCopy.transferFileID)
+		if err != nil {
+			return err
+		}
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !hasCached {
+		cached = cachedFolder{
+			loadedAt: time.Now(),
+			content:  append([]api.Item(nil), folderContent...),
+		}
+		if singleFile != nil {
+			fileCopy := *singleFile
+			cached.file = &fileCopy
+		}
+		f.folderCache[cacheKey] = cached
+	}
+
+	var addDir func(remote string, modTime time.Time, id string) *entry
+	addDir = func(remote string, modTime time.Time, id string) *entry {
+		remote = strings.Trim(remote, "/")
+		if existing, ok := f.dirs[remote]; ok {
+			if existing.id == "" && id != "" {
+				existing.id = id
+			}
+			return existing
+		}
+		name := path.Base(remote)
+		if remote == "" {
+			name = ""
+		}
+		f.dirs[remote] = &entry{remote: remote, name: name, isDir: true, id: id, modTime: modTime}
+		if parent := path.Dir(remote); remote != "" && parent != "." {
+			addDir(parent, modTime, "")
+		}
+		return f.dirs[remote]
+	}
+	addFile := func(remote string, item *api.Item) {
+		remote = uniqueFile(f.files, remote, infoCopy.transferID, item.ID)
+		parent := path.Dir(remote)
+		if parent != "." {
+			addDir(parent, itemTime(item), "")
+		}
+		f.files[remote] = &entry{
+			remote:         remote,
+			name:           path.Base(remote),
+			id:             item.ID,
+			size:           item.Size,
+			modTime:        itemTime(item),
+			mimeType:       item.MimeType,
+			url:            item.Link,
+			transferID:     infoCopy.transferID,
+			transferRoot:   infoCopy.transferRoot,
+			transferFileID: infoCopy.transferFileID,
+			transferDirID:  infoCopy.transferDirID,
+		}
+	}
+
+	if singleFile != nil {
+		fileRemote := encodePath(f.opt.Enc, singleFile.Name)
+		if fileRemote == "" {
+			fileRemote = singleFile.ID
+		}
+		addFile(path.Join(actualDir, fileRemote), singleFile)
+	}
+	if len(folderContent) > 0 {
+		for i := range folderContent {
+			item := folderContent[i]
+			item.Name = cleanSegment(f.opt.Enc.ToStandardName(item.Name))
+			if item.Name == "" {
+				item.Name = item.ID
+			}
+			childRemote := path.Join(actualDir, item.Name)
+			switch item.Type {
+			case api.ItemTypeFolder:
+				dir := addDir(childRemote, itemTime(&item), item.ID)
+				dir.transferID = infoCopy.transferID
+				dir.transferRoot = infoCopy.transferRoot
+				dir.transferFileID = infoCopy.transferFileID
+				dir.transferDirID = infoCopy.transferDirID
+				dir.folderID = item.ID
+			case api.ItemTypeFile:
+				addFile(childRemote, &item)
+			default:
+				fs.Debugf(f, "Ignoring Premiumize item %q - unknown type %q", item.Name, item.Type)
+			}
+		}
+	}
+	return nil
+}
+
 // List the objects and directories in dir into entries.
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
 	dir = strings.Trim(dir, "/")
 	actualDir := f.actualPath(dir)
 	if !f.shouldRefreshForDir(actualDir) && f.cachedDirExists(actualDir) {
+		err = f.ensureDirLoaded(ctx, actualDir)
+		if err != nil {
+			return nil, err
+		}
 		return f.listFromCache(actualDir)
 	}
 	err = f.refresh(ctx)
 	if err != nil {
 		if f.cachedDirExists(actualDir) {
+			loadErr := f.ensureDirLoaded(ctx, actualDir)
+			if loadErr != nil {
+				return nil, loadErr
+			}
 			return f.listFromCache(actualDir)
 		}
+		return nil, err
+	}
+	err = f.ensureDirLoaded(ctx, actualDir)
+	if err != nil {
 		return nil, err
 	}
 	return f.listFromCache(actualDir)
@@ -1009,8 +1164,20 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	if found || err != nil {
 		return obj, err
 	}
+	err = f.ensureDirLoaded(ctx, parentDir(f.actualPath(remote)))
+	if err != nil && err != fs.ErrorDirNotFound {
+		return nil, err
+	}
+	obj, found, err = f.objectFromCache(remote)
+	if found || err != nil {
+		return obj, err
+	}
 	err = f.refresh(ctx)
 	if err != nil {
+		return nil, err
+	}
+	err = f.ensureDirLoaded(ctx, parentDir(f.actualPath(remote)))
+	if err != nil && err != fs.ErrorDirNotFound {
 		return nil, err
 	}
 	obj, found, err = f.objectFromCache(remote)
