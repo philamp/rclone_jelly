@@ -108,6 +108,17 @@ type Fs struct {
 	startupDone       chan struct{}
 }
 
+type torboxNotification struct {
+	ID      json.RawMessage `json:"id"`
+	Title   string          `json:"title"`
+	Message string          `json:"message"`
+}
+
+type torboxNotificationListResponse struct {
+	api.Response
+	Data []torboxNotification `json:"data"`
+}
+
 // Object describes a TorBox file.
 type Object struct {
 	fs           *Fs
@@ -391,6 +402,152 @@ func (f *Fs) startRuntimeTasks(ctx context.Context) {
 			f.writeHashDump()
 			f.importRemoteDumps(ctx)
 		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (n torboxNotification) idString() string {
+	id := strings.TrimSpace(string(n.ID))
+	if id == "" || id == "null" {
+		return ""
+	}
+	if len(id) >= 2 && id[0] == '"' && id[len(id)-1] == '"' {
+		var decoded string
+		if err := json.Unmarshal(n.ID, &decoded); err == nil {
+			return decoded
+		}
+	}
+	return id
+}
+
+func (n torboxNotification) meansCompletion() bool {
+	text := strings.ToLower(n.Title + " " + n.Message)
+	return strings.Contains(text, "ready to download") ||
+		strings.Contains(text, "download completed") ||
+		strings.Contains(text, "download complete")
+}
+
+func (f *Fs) listCompletionNotifications(ctx context.Context) ([]torboxNotification, error) {
+	opts := rest.Opts{
+		Method: "GET",
+		Path:   "/notifications/mynotifications",
+	}
+	var resp *http.Response
+	var result torboxNotificationListResponse
+	var err error
+	fs.Debugf(f, "TorBox API call: GET /notifications/mynotifications")
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		fs.Debugf(f, "TorBox API error: GET /notifications/mynotifications: %v", err)
+		return nil, err
+	}
+	if !result.Success {
+		return nil, &result.Response
+	}
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
+	}
+	notifications := make([]torboxNotification, 0, len(result.Data))
+	for _, notification := range result.Data {
+		if notification.meansCompletion() {
+			notifications = append(notifications, notification)
+		}
+	}
+	fs.Debugf(f, "TorBox API response: GET /notifications/mynotifications status=%d completion_items=%d total_items=%d", status, len(notifications), len(result.Data))
+	return notifications, nil
+}
+
+func (f *Fs) clearNotification(ctx context.Context, notification torboxNotification) {
+	id := notification.idString()
+	if id == "" {
+		return
+	}
+	opts := rest.Opts{
+		Method: "POST",
+		Path:   "/notifications/clear/" + id,
+	}
+	var resp *http.Response
+	var result api.Response
+	var err error
+	fs.Debugf(f, "TorBox API call: POST /notifications/clear/%s", id)
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		fs.Debugf(f, "TorBox API error: POST /notifications/clear/%s: %v", id, err)
+		return
+	}
+	if !result.Success {
+		fs.Debugf(f, "TorBox API unsuccessful response: POST /notifications/clear/%s: %v", id, result.Error())
+		return
+	}
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
+	}
+	fs.Debugf(f, "TorBox API response: POST /notifications/clear/%s status=%d", id, status)
+}
+
+func (f *Fs) invalidateRootCache() {
+	f.mu.Lock()
+	f.cacheTime = time.Time{}
+	f.mu.Unlock()
+}
+
+// ChangeNotify watches TorBox completion notifications at the rclone poll interval.
+func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
+	go f.changeNotify(ctx, notifyFunc, pollIntervalChan)
+}
+
+func (f *Fs) changeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
+	var ticker *time.Ticker
+	var tickerC <-chan time.Time
+	for {
+		select {
+		case pollInterval, ok := <-pollIntervalChan:
+			if !ok {
+				if ticker != nil {
+					ticker.Stop()
+				}
+				return
+			}
+			if ticker != nil {
+				ticker.Stop()
+				ticker, tickerC = nil, nil
+			}
+			if pollInterval > 0 {
+				ticker = time.NewTicker(pollInterval)
+				tickerC = ticker.C
+				fs.Infof(f, "TorBox notification polling enabled: interval=%v", pollInterval)
+			} else {
+				fs.Infof(f, "TorBox notification polling disabled")
+			}
+		case <-tickerC:
+			notifications, err := f.listCompletionNotifications(ctx)
+			if err != nil {
+				fs.Debugf(f, "TorBox notification polling failed: %v", err)
+				continue
+			}
+			if len(notifications) == 0 {
+				continue
+			}
+			for _, notification := range notifications {
+				f.clearNotification(ctx, notification)
+			}
+			f.invalidateRootCache()
+			notifyFunc(string(sourceTorrent), fs.EntryDirectory)
+			notifyFunc(string(sourceUsenet), fs.EntryDirectory)
+			_ = torrentdump.TriggerJellygrailScan(ctx, "torbox", "notification")
+		case <-ctx.Done():
+			if ticker != nil {
+				ticker.Stop()
+			}
 			return
 		}
 	}

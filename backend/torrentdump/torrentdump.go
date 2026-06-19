@@ -2,8 +2,12 @@
 package torrentdump
 
 import (
+	"context"
 	"encoding/gob"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -22,6 +26,9 @@ const (
 	DumpInterval = 2 * time.Hour
 	// RemoteDumpGlob is where remote WebDAV dumps are expected locally.
 	RemoteDumpGlob = "/mounts/remote_webdav/dumps/dump_*.gob"
+
+	defaultJellygrailScanTriggerPort = "16685"
+	defaultJellygrailScanTriggerPath = "/app/trigger_remote_scan"
 )
 
 var btihRe = regexp.MustCompile(`(?i)\b[0-9a-f]{40}\b|[a-z2-7]{32}`)
@@ -52,6 +59,54 @@ func RemoteScanTargetProvider() string {
 		fs.Infof(nil, "Torrent dump remote scan target provider: %s", target)
 	})
 	return target
+}
+
+// JellygrailScanTriggerURL returns the URL used to ask Jellygrail to scan.
+func JellygrailScanTriggerURL() string {
+	if rawURL := strings.TrimSpace(os.Getenv("JELLYGRAIL_SCAN_TRIGGER_URL")); rawURL != "" {
+		return rawURL
+	}
+	port := strings.TrimSpace(os.Getenv("WEBSERVICE_INTERNAL_PORT"))
+	if port == "" {
+		port = defaultJellygrailScanTriggerPort
+	}
+	return "http://127.0.0.1:" + port + defaultJellygrailScanTriggerPath
+}
+
+// TriggerJellygrailScan asks the local Jellygrail service to trigger jgScanJob.
+func TriggerJellygrailScan(ctx context.Context, provider, reason string) error {
+	rawURL := JellygrailScanTriggerURL()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+	q := u.Query()
+	if provider != "" {
+		q.Set("provider", provider)
+	}
+	if reason != "" {
+		q.Set("reason", reason)
+	}
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fs.Debugf(nil, "Torrent dump Jellygrail scan trigger failed: url=%s: %v", u.Redacted(), err)
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		err = fmt.Errorf("jellygrail scan trigger returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		fs.Debugf(nil, "Torrent dump Jellygrail scan trigger failed: %v", err)
+		return err
+	}
+	fs.Infof(nil, "Torrent dump Jellygrail scan triggered: provider=%s reason=%s", provider, reason)
+	return nil
 }
 
 // Magnet returns a magnet URI for a hash or passes through a magnet URI.

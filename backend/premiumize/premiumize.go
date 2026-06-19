@@ -103,6 +103,8 @@ type Fs struct {
 	folderCache     map[string]cachedFolder
 	activeOpens     map[string]int
 	pendingCleanup  map[string]pendingCleanup
+	readyTransfers  map[string]struct{}
+	readyLoaded     bool
 	startupDone     chan struct{}
 }
 
@@ -294,6 +296,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		folderCache:     make(map[string]cachedFolder),
 		activeOpens:     make(map[string]int),
 		pendingCleanup:  make(map[string]pendingCleanup),
+		readyTransfers:  make(map[string]struct{}),
 		startupDone:     make(chan struct{}),
 	}
 	f.features = (&fs.Features{
@@ -562,6 +565,80 @@ func (f *Fs) listTransfers(ctx context.Context) ([]api.Transfer, error) {
 	}
 	fs.Debugf(f, "Premiumize API response: GET /transfer/list items=%d", len(result.Transfers))
 	return result.Transfers, nil
+}
+
+func (f *Fs) invalidateRootCache() {
+	f.mu.Lock()
+	f.cacheTime = time.Time{}
+	f.mu.Unlock()
+}
+
+// ChangeNotify watches transfer/list at the rclone poll interval.
+func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
+	go f.changeNotify(ctx, notifyFunc, pollIntervalChan)
+}
+
+func (f *Fs) changeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
+	var ticker *time.Ticker
+	var tickerC <-chan time.Time
+	for {
+		select {
+		case pollInterval, ok := <-pollIntervalChan:
+			if !ok {
+				if ticker != nil {
+					ticker.Stop()
+				}
+				return
+			}
+			if ticker != nil {
+				ticker.Stop()
+				ticker, tickerC = nil, nil
+			}
+			if pollInterval > 0 {
+				ticker = time.NewTicker(pollInterval)
+				tickerC = ticker.C
+				fs.Infof(f, "Premiumize transfer polling enabled: interval=%v", pollInterval)
+			} else {
+				fs.Infof(f, "Premiumize transfer polling disabled")
+			}
+		case <-tickerC:
+			transfers, err := f.listTransfers(ctx)
+			if err != nil {
+				fs.Debugf(f, "Premiumize transfer polling failed: %v", err)
+				continue
+			}
+			readyNow := make(map[string]struct{}, len(transfers))
+			newReady := 0
+			f.mu.Lock()
+			baseline := !f.readyLoaded
+			for _, transfer := range transfers {
+				if !transferReady(transfer) {
+					continue
+				}
+				readyNow[transfer.ID] = struct{}{}
+				if !baseline {
+					if _, ok := f.readyTransfers[transfer.ID]; !ok {
+						newReady++
+					}
+				}
+			}
+			f.readyTransfers = readyNow
+			f.readyLoaded = true
+			f.mu.Unlock()
+			if newReady == 0 {
+				continue
+			}
+			fs.Infof(f, "Premiumize transfer polling detected ready transfer(s): count=%d", newReady)
+			f.invalidateRootCache()
+			notifyFunc(sourceTorrent, fs.EntryDirectory)
+			_ = torrentdump.TriggerJellygrailScan(ctx, "premiumize", "transfer_ready")
+		case <-ctx.Done():
+			if ticker != nil {
+				ticker.Stop()
+			}
+			return
+		}
+	}
 }
 
 func (f *Fs) listFolder(ctx context.Context, folderID string) (*api.FolderListResponse, error) {
