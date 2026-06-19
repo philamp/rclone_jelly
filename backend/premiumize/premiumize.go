@@ -40,6 +40,7 @@ const (
 	rootURL          = "https://www.premiumize.me/api"
 	cacheDuration    = 10 * time.Second
 	checkDuration    = 48 * time.Hour
+	cleanupDelay     = 30 * time.Second
 	rateLimitBackoff = 5 * time.Second
 	sourceTorrent    = "torrent"
 	statusFinished   = "finished"
@@ -95,6 +96,8 @@ type Fs struct {
 
 	transferChecks map[string]transferCheck
 	folderCache    map[string]cachedFolder
+	activeOpens    map[string]int
+	pendingCleanup map[string]pendingCleanup
 }
 
 // Object describes a Premiumize file.
@@ -115,6 +118,12 @@ type Object struct {
 	contentPath    string
 }
 
+type openReadCloser struct {
+	io.ReadCloser
+	object *Object
+	closed bool
+}
+
 type transferCheck struct {
 	checkedAt     time.Time
 	src           string
@@ -132,6 +141,16 @@ type cachedFolder struct {
 	loadedAt time.Time
 	content  []api.Item
 	file     *api.Item
+}
+
+type pendingCleanup struct {
+	transferID string
+	fileID     string
+	folderID   string
+}
+
+func (c pendingCleanup) empty() bool {
+	return c.transferID == "" || (c.fileID == "" && c.folderID == "")
 }
 
 type entry struct {
@@ -263,6 +282,8 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		stored:         make(map[string]storedTransfer),
 		transferChecks: make(map[string]transferCheck),
 		folderCache:    make(map[string]cachedFolder),
+		activeOpens:    make(map[string]int),
+		pendingCleanup: make(map[string]pendingCleanup),
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,
@@ -546,6 +567,94 @@ func (f *Fs) createTransfer(ctx context.Context, src string) error {
 	return nil
 }
 
+func (f *Fs) queueCleanupLocked(transferID, fileID, folderID string) {
+	if transferID == "" {
+		return
+	}
+	f.pendingCleanup[transferID] = pendingCleanup{
+		transferID: transferID,
+		fileID:     fileID,
+		folderID:   folderID,
+	}
+	fs.Debugf(f, "Premiumize cloud cleanup deferred: transfer_id=%s active_opens=%d delay=%v", transferID, f.activeOpens[transferID], cleanupDelay)
+	go f.runPendingCleanupAfter(transferID, cleanupDelay)
+}
+
+func (f *Fs) runPendingCleanupAfter(transferID string, delay time.Duration) {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	<-timer.C
+
+	var cleanup pendingCleanup
+	f.mu.Lock()
+	if f.activeOpens[transferID] != 0 {
+		f.mu.Unlock()
+		return
+	}
+	cleanup = f.pendingCleanup[transferID]
+	delete(f.pendingCleanup, transferID)
+	f.mu.Unlock()
+
+	if !cleanup.empty() {
+		fs.Debugf(f, "Premiumize deferred cloud cleanup starting: transfer_id=%s", cleanup.transferID)
+		err := f.completeCloudCleanup(context.Background(), cleanup)
+		if err != nil {
+			fs.Debugf(f, "Premiumize deferred cloud cleanup failed: transfer_id=%s: %v", cleanup.transferID, err)
+		}
+	}
+}
+
+func (f *Fs) startOpen(transferID string) {
+	if transferID == "" {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.activeOpens[transferID]++
+}
+
+func (f *Fs) finishOpen(transferID string) {
+	if transferID == "" {
+		return
+	}
+	var cleanup pendingCleanup
+	f.mu.Lock()
+	if f.activeOpens[transferID] > 1 {
+		f.activeOpens[transferID]--
+		f.mu.Unlock()
+		return
+	}
+	delete(f.activeOpens, transferID)
+	cleanup = f.pendingCleanup[transferID]
+	delete(f.pendingCleanup, transferID)
+	f.mu.Unlock()
+
+	if !cleanup.empty() {
+		fs.Debugf(f, "Premiumize deferred cloud cleanup starting: transfer_id=%s", cleanup.transferID)
+		err := f.completeCloudCleanup(context.Background(), cleanup)
+		if err != nil {
+			fs.Debugf(f, "Premiumize deferred cloud cleanup failed: transfer_id=%s: %v", cleanup.transferID, err)
+		}
+	}
+}
+
+func (f *Fs) queueStoredCleanupsLocked() {
+	for transferID, stored := range f.stored {
+		cleanup := pendingCleanup{
+			transferID: transferID,
+			fileID:     stored.FileID,
+			folderID:   stored.FolderID,
+		}
+		if cleanup.empty() {
+			continue
+		}
+		if _, ok := f.pendingCleanup[transferID]; ok {
+			continue
+		}
+		f.queueCleanupLocked(cleanup.transferID, cleanup.fileID, cleanup.folderID)
+	}
+}
+
 func isUsenetSource(source transferSourceInfo) bool {
 	sourceType := strings.ToLower(strings.TrimSpace(source.sourceType))
 	src := strings.ToLower(strings.TrimSpace(source.src))
@@ -661,10 +770,7 @@ func (f *Fs) refresh(ctx context.Context) error {
 			} else {
 				err = f.storeDirectDLTransfer(transfer, src, transferFileID, transferDirID, content)
 				if err == nil {
-					err = f.deleteCloudItem(ctx, transferFileID, transferDirID)
-					if err != nil {
-						fs.Debugf(f, "Premiumize cloud cleanup failed for transfer %s, keeping direct links anyway: %v", transfer.ID, err)
-					}
+					f.queueCleanupLocked(transfer.ID, transferFileID, transferDirID)
 				} else {
 					fs.Errorf(f, "Premiumize persistent transfer cache failed for transfer %s, keeping cloud item: %v", transfer.ID, err)
 				}
@@ -674,6 +780,7 @@ func (f *Fs) refresh(ctx context.Context) error {
 		}
 	}
 	f.addStoredTransfers(files, dirs, addDir, liveTransfers)
+	f.queueStoredCleanupsLocked()
 
 	f.dirs = dirs
 	f.files = files
@@ -1311,6 +1418,24 @@ func (o *Object) openDownloadURL(ctx context.Context, downloadURL string, option
 	return resp.Body, nil
 }
 
+func (rc *openReadCloser) Close() error {
+	if rc.closed {
+		return nil
+	}
+	rc.closed = true
+	err := rc.ReadCloser.Close()
+	rc.object.fs.finishOpen(rc.object.transferID)
+	return err
+}
+
+func (o *Object) wrapOpen(in io.ReadCloser) io.ReadCloser {
+	if o.transferID == "" {
+		return in
+	}
+	o.fs.startOpen(o.transferID)
+	return &openReadCloser{ReadCloser: in, object: o}
+}
+
 func (o *Object) refreshStoredDownloadURL(ctx context.Context) error {
 	if o.transferID == "" || o.transferSrc == "" || o.contentPath == "" {
 		return errors.New("object is not backed by a persistent Premiumize transfer")
@@ -1373,7 +1498,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	fs.FixRangeOption(options, o.size)
 	in, err := o.openDownloadURL(ctx, o.url, options)
 	if err == nil {
-		return in, nil
+		return o.wrapOpen(in), nil
 	}
 	if o.transferSrc == "" || o.contentPath == "" {
 		return nil, err
@@ -1384,7 +1509,11 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 		return nil, fmt.Errorf("%w; refresh failed: %v", err, refreshErr)
 	}
 	fs.FixRangeOption(options, o.size)
-	return o.openDownloadURL(ctx, o.url, options)
+	in, err = o.openDownloadURL(ctx, o.url, options)
+	if err != nil {
+		return nil, err
+	}
+	return o.wrapOpen(in), nil
 }
 
 // Update is unsupported on read-only Premiumize transfer remotes.
@@ -1447,6 +1576,32 @@ func (f *Fs) deleteCloudItem(ctx context.Context, fileID, folderID string) error
 		}
 		fs.Debugf(f, "Premiumize API response: POST /item/delete id=%s", fileID)
 	}
+	return nil
+}
+
+func (f *Fs) completeCloudCleanup(ctx context.Context, cleanup pendingCleanup) error {
+	if cleanup.empty() {
+		return nil
+	}
+	err := f.deleteCloudItem(ctx, cleanup.fileID, cleanup.folderID)
+	if err != nil {
+		return err
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	stored, ok := f.stored[cleanup.transferID]
+	if !ok {
+		return nil
+	}
+	stored.FileID = ""
+	stored.FolderID = ""
+	f.stored[cleanup.transferID] = stored
+	err = f.saveStore()
+	if err != nil {
+		return err
+	}
+	fs.Debugf(f, "Premiumize cloud cleanup marked done in persistent cache: transfer_id=%s", cleanup.transferID)
 	return nil
 }
 
