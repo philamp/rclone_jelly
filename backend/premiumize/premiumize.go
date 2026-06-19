@@ -435,7 +435,7 @@ func (f *Fs) writeHashDump() {
 }
 
 func premiumizeIsScanTarget() bool {
-	target := strings.ToLower(strings.TrimSpace(os.Getenv("REMOTE_SCAN_TARGET_PROVIDER")))
+	target := torrentdump.RemoteScanTargetProvider()
 	return target == "premiumize" || target == "pm"
 }
 

@@ -10,8 +10,10 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
 )
 
@@ -24,6 +26,8 @@ const (
 
 var btihRe = regexp.MustCompile(`(?i)\b[0-9a-f]{40}\b|[a-z2-7]{32}`)
 
+var scanTargetLogOnce sync.Once
+
 // Dump is the on-disk gob format.
 type Dump struct {
 	Version   int
@@ -35,6 +39,19 @@ type Dump struct {
 // Path returns the local dump path for a backend provider name.
 func Path(provider string) string {
 	return filepath.Join(config.GetCacheDir(), "dumps", "dump_"+strings.ToLower(provider)+".gob")
+}
+
+// RemoteScanTargetProvider returns the configured provider for remote dump imports.
+func RemoteScanTargetProvider() string {
+	target := strings.ToLower(strings.TrimSpace(os.Getenv("REMOTE_SCAN_TARGET_PROVIDER")))
+	scanTargetLogOnce.Do(func() {
+		if target == "" {
+			fs.Infof(nil, "Torrent dump remote scan target provider: <empty> (imports disabled)")
+			return
+		}
+		fs.Infof(nil, "Torrent dump remote scan target provider: %s", target)
+	})
+	return target
 }
 
 // Magnet returns a magnet URI for a hash or passes through a magnet URI.
@@ -99,7 +116,7 @@ func Write(path, provider string, hashes map[string]struct{}) error {
 		return err
 	}
 	tmpPath := path + ".tmp"
-	out, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	out, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
@@ -119,7 +136,11 @@ func Write(path, provider string, hashes map[string]struct{}) error {
 		_ = os.Remove(tmpPath)
 		return closeErr
 	}
-	return os.Rename(tmpPath, path)
+	err = os.Rename(tmpPath, path)
+	if err != nil {
+		return err
+	}
+	return os.Chmod(path, 0644)
 }
 
 // Read reads a gob dump from path.

@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
 	"sort"
 	"strconv"
@@ -311,7 +310,7 @@ func (f *Fs) writeHashDump() {
 }
 
 func torboxIsScanTarget() bool {
-	target := strings.ToLower(strings.TrimSpace(os.Getenv("REMOTE_SCAN_TARGET_PROVIDER")))
+	target := torrentdump.RemoteScanTargetProvider()
 	return target == "torbox" || target == "tb"
 }
 
