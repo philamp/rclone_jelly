@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"sort"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/rclone/rclone/backend/torbox/api"
+	"github.com/rclone/rclone/backend/torrentdump"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/config/configmap"
@@ -92,15 +94,19 @@ type Fs struct {
 	pacer          *fs.Pacer
 	requestdlPacer *fs.Pacer
 
-	mu        sync.Mutex
-	cacheTime time.Time
-	dirs      map[string]*entry
-	files     map[string]*entry
-	dlURLs    map[string]string
+	mu              sync.Mutex
+	cacheTime       time.Time
+	dirs            map[string]*entry
+	files           map[string]*entry
+	dlURLs          map[string]string
+	knownHashes     map[string]struct{}
+	completedHashes map[string]struct{}
+	dumpPath        string
 
 	requestdlWindowMu sync.Mutex
 	requestdlCalls    []time.Time
 	lastRequestdl     time.Time
+	startupDone       chan struct{}
 }
 
 // Object describes a TorBox file.
@@ -217,16 +223,20 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	srv.SetErrorHandler(errorHandler)
 
 	f := &Fs{
-		name:           name,
-		root:           root,
-		opt:            *opt,
-		srv:            srv,
-		dlSrv:          rest.NewClient(client),
-		pacer:          fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
-		requestdlPacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(requestdlMinSleep), pacer.MaxSleep(requestdlMaxSleep), pacer.DecayConstant(decayConstant))),
-		dirs:           make(map[string]*entry),
-		files:          make(map[string]*entry),
-		dlURLs:         make(map[string]string),
+		name:            name,
+		root:            root,
+		opt:             *opt,
+		srv:             srv,
+		dlSrv:           rest.NewClient(client),
+		pacer:           fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+		requestdlPacer:  fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(requestdlMinSleep), pacer.MaxSleep(requestdlMaxSleep), pacer.DecayConstant(decayConstant))),
+		dirs:            make(map[string]*entry),
+		files:           make(map[string]*entry),
+		dlURLs:          make(map[string]string),
+		knownHashes:     make(map[string]struct{}),
+		completedHashes: make(map[string]struct{}),
+		dumpPath:        torrentdump.Path("torbox"),
+		startupDone:     make(chan struct{}),
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,
@@ -246,12 +256,145 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 			return nil, fs.ErrorDirNotFound
 		}
 	}
+	go f.startRuntimeTasks(ctx)
 	return f, nil
 }
 
 type transferList struct {
 	source sourceType
 	items  []api.Transfer
+}
+
+func (f *Fs) recordKnownHashLocked(value string) {
+	hash := torrentdump.NormalizeHash(value)
+	if hash != "" {
+		f.knownHashes[hash] = struct{}{}
+	}
+}
+
+func (f *Fs) recordCompletedHashLocked(value string) {
+	hash := torrentdump.NormalizeHash(value)
+	if hash != "" {
+		f.knownHashes[hash] = struct{}{}
+		f.completedHashes[hash] = struct{}{}
+	}
+}
+
+func (f *Fs) localKnownHashes() map[string]struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]struct{}, len(f.knownHashes))
+	for hash := range f.knownHashes {
+		out[hash] = struct{}{}
+	}
+	return out
+}
+
+func (f *Fs) localCompletedHashes() map[string]struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]struct{}, len(f.completedHashes))
+	for hash := range f.completedHashes {
+		out[hash] = struct{}{}
+	}
+	return out
+}
+
+func (f *Fs) writeHashDump() {
+	hashes := f.localCompletedHashes()
+	err := torrentdump.Write(f.dumpPath, "torbox", hashes)
+	if err != nil {
+		fs.Debugf(f, "TorBox dump write failed: %v", err)
+		return
+	}
+	fs.Debugf(f, "TorBox dump written: path=%s hashes=%d", f.dumpPath, len(hashes))
+}
+
+func torboxIsScanTarget() bool {
+	target := strings.ToLower(strings.TrimSpace(os.Getenv("REMOTE_SCAN_TARGET_PROVIDER")))
+	return target == "torbox" || target == "tb"
+}
+
+func (f *Fs) createTorrent(ctx context.Context, hash string) error {
+	params := url.Values{}
+	params.Set("magnet", torrentdump.Magnet(hash))
+	params.Set("seed", "1")
+	opts := rest.Opts{
+		Method:          "POST",
+		Path:            "/torrents/createtorrent",
+		MultipartParams: params,
+	}
+	var resp *http.Response
+	var result api.Response
+	var err error
+	fs.Debugf(f, "TorBox API call: POST /torrents/createtorrent hash=%s", torrentdump.NormalizeHash(hash))
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		fs.Debugf(f, "TorBox API error: POST /torrents/createtorrent hash=%s: %v", torrentdump.NormalizeHash(hash), err)
+		return err
+	}
+	if !result.Success {
+		return &result
+	}
+	return nil
+}
+
+func (f *Fs) importRemoteDumps(ctx context.Context) {
+	if !torboxIsScanTarget() {
+		return
+	}
+	local := f.localKnownHashes()
+	for _, dumpPath := range torrentdump.RemoteDumpPaths() {
+		dump, err := torrentdump.Read(dumpPath)
+		if err != nil {
+			fs.Debugf(f, "TorBox remote dump read failed: path=%s: %v", dumpPath, err)
+			continue
+		}
+		for _, hash := range dump.Hashes {
+			hash = torrentdump.NormalizeHash(hash)
+			if hash == "" {
+				continue
+			}
+			if _, ok := local[hash]; ok {
+				continue
+			}
+			err = f.createTorrent(ctx, hash)
+			if err != nil {
+				fs.Debugf(f, "TorBox remote dump import failed: hash=%s provider=%s: %v", hash, dump.Provider, err)
+				continue
+			}
+			local[hash] = struct{}{}
+			f.mu.Lock()
+			f.knownHashes[hash] = struct{}{}
+			f.mu.Unlock()
+			fs.Debugf(f, "TorBox remote dump hash imported: hash=%s provider=%s", hash, dump.Provider)
+		}
+	}
+}
+
+func (f *Fs) startRuntimeTasks(ctx context.Context) {
+	err := f.refresh(ctx)
+	if err != nil {
+		fs.Debugf(f, "TorBox startup refresh failed before dump/import tasks: %v", err)
+	}
+	close(f.startupDone)
+	f.writeHashDump()
+	f.importRemoteDumps(ctx)
+
+	ticker := time.NewTicker(torrentdump.DumpInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			f.writeHashDump()
+			f.importRemoteDumps(ctx)
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (f *Fs) listTransfers(ctx context.Context, source sourceType) ([]api.Transfer, error) {
@@ -349,8 +492,14 @@ func (f *Fs) refresh(ctx context.Context) error {
 
 	for _, list := range lists {
 		for _, transfer := range list.items {
+			if list.source == sourceTorrent {
+				f.recordKnownHashLocked(transfer.Hash)
+			}
 			if !transferReady(transfer) {
 				continue
+			}
+			if list.source == sourceTorrent {
+				f.recordCompletedHashLocked(transfer.Hash)
 			}
 			modTime := parseTime(transfer.CachedAt, transfer.UpdatedAt, transfer.CreatedAt)
 			transferName := cleanSegment(f.opt.Enc.ToStandardName(transfer.Name))

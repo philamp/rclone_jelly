@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/rclone/rclone/backend/premiumize/api"
+	"github.com/rclone/rclone/backend/torrentdump"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/config/configmap"
@@ -87,17 +88,22 @@ type Fs struct {
 	dlSrv     *rest.Client
 	pacer     *fs.Pacer
 	storePath string
+	dumpPath  string
 
-	mu        sync.Mutex
-	cacheTime time.Time
-	dirs      map[string]*entry
-	files     map[string]*entry
-	stored    map[string]storedTransfer
+	mu              sync.Mutex
+	cacheTime       time.Time
+	dirs            map[string]*entry
+	files           map[string]*entry
+	stored          map[string]storedTransfer
+	knownHashes     map[string]struct{}
+	completedHashes map[string]struct{}
 
-	transferChecks map[string]transferCheck
-	folderCache    map[string]cachedFolder
-	activeOpens    map[string]int
-	pendingCleanup map[string]pendingCleanup
+	transferChecks  map[string]transferCheck
+	transferSources map[string]transferSourceInfo
+	folderCache     map[string]cachedFolder
+	activeOpens     map[string]int
+	pendingCleanup  map[string]pendingCleanup
+	startupDone     chan struct{}
 }
 
 // Object describes a Premiumize file.
@@ -270,20 +276,25 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	srv.SetErrorHandler(errorHandler)
 
 	f := &Fs{
-		name:           name,
-		root:           root,
-		opt:            *opt,
-		srv:            srv,
-		dlSrv:          rest.NewClient(client),
-		pacer:          fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
-		storePath:      premiumizeStorePath(name, root),
-		dirs:           make(map[string]*entry),
-		files:          make(map[string]*entry),
-		stored:         make(map[string]storedTransfer),
-		transferChecks: make(map[string]transferCheck),
-		folderCache:    make(map[string]cachedFolder),
-		activeOpens:    make(map[string]int),
-		pendingCleanup: make(map[string]pendingCleanup),
+		name:            name,
+		root:            root,
+		opt:             *opt,
+		srv:             srv,
+		dlSrv:           rest.NewClient(client),
+		pacer:           fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+		storePath:       premiumizeStorePath(name, root),
+		dumpPath:        torrentdump.Path("premiumize"),
+		dirs:            make(map[string]*entry),
+		files:           make(map[string]*entry),
+		stored:          make(map[string]storedTransfer),
+		knownHashes:     make(map[string]struct{}),
+		completedHashes: make(map[string]struct{}),
+		transferChecks:  make(map[string]transferCheck),
+		transferSources: make(map[string]transferSourceInfo),
+		folderCache:     make(map[string]cachedFolder),
+		activeOpens:     make(map[string]int),
+		pendingCleanup:  make(map[string]pendingCleanup),
+		startupDone:     make(chan struct{}),
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,
@@ -295,6 +306,11 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	if err != nil {
 		fs.Errorf(f, "Failed to load Premiumize persistent transfer cache: %v", err)
 	}
+	for _, stored := range f.stored {
+		f.recordKnownHashLocked(stored.Src)
+		f.recordCompletedHashLocked(stored.Src)
+	}
+	go f.startRuntimeTasks(ctx)
 
 	if root != "" && root != sourceTorrent {
 		err = f.refresh(ctx)
@@ -371,6 +387,111 @@ func (f *Fs) saveStore() error {
 		return closeErr
 	}
 	return os.Rename(tmpPath, f.storePath)
+}
+
+func (f *Fs) recordKnownHashLocked(value string) {
+	hash := torrentdump.NormalizeHash(value)
+	if hash != "" {
+		f.knownHashes[hash] = struct{}{}
+	}
+}
+
+func (f *Fs) recordCompletedHashLocked(value string) {
+	hash := torrentdump.NormalizeHash(value)
+	if hash != "" {
+		f.knownHashes[hash] = struct{}{}
+		f.completedHashes[hash] = struct{}{}
+	}
+}
+
+func (f *Fs) localKnownHashes() map[string]struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]struct{}, len(f.knownHashes))
+	for hash := range f.knownHashes {
+		out[hash] = struct{}{}
+	}
+	return out
+}
+
+func (f *Fs) localCompletedHashes() map[string]struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]struct{}, len(f.completedHashes))
+	for hash := range f.completedHashes {
+		out[hash] = struct{}{}
+	}
+	return out
+}
+
+func (f *Fs) writeHashDump() {
+	hashes := f.localCompletedHashes()
+	err := torrentdump.Write(f.dumpPath, "premiumize", hashes)
+	if err != nil {
+		fs.Debugf(f, "Premiumize dump write failed: %v", err)
+		return
+	}
+	fs.Debugf(f, "Premiumize dump written: path=%s hashes=%d", f.dumpPath, len(hashes))
+}
+
+func premiumizeIsScanTarget() bool {
+	target := strings.ToLower(strings.TrimSpace(os.Getenv("REMOTE_SCAN_TARGET_PROVIDER")))
+	return target == "premiumize" || target == "pm"
+}
+
+func (f *Fs) importRemoteDumps(ctx context.Context) {
+	if !premiumizeIsScanTarget() {
+		return
+	}
+	local := f.localKnownHashes()
+	for _, dumpPath := range torrentdump.RemoteDumpPaths() {
+		dump, err := torrentdump.Read(dumpPath)
+		if err != nil {
+			fs.Debugf(f, "Premiumize remote dump read failed: path=%s: %v", dumpPath, err)
+			continue
+		}
+		for _, hash := range dump.Hashes {
+			hash = torrentdump.NormalizeHash(hash)
+			if hash == "" {
+				continue
+			}
+			if _, ok := local[hash]; ok {
+				continue
+			}
+			err = f.createTransfer(ctx, torrentdump.Magnet(hash))
+			if err != nil {
+				fs.Debugf(f, "Premiumize remote dump import failed: hash=%s provider=%s: %v", hash, dump.Provider, err)
+				continue
+			}
+			local[hash] = struct{}{}
+			f.mu.Lock()
+			f.knownHashes[hash] = struct{}{}
+			f.mu.Unlock()
+			fs.Debugf(f, "Premiumize remote dump hash imported: hash=%s provider=%s", hash, dump.Provider)
+		}
+	}
+}
+
+func (f *Fs) startRuntimeTasks(ctx context.Context) {
+	err := f.refresh(ctx)
+	if err != nil {
+		fs.Debugf(f, "Premiumize startup refresh failed before dump/import tasks: %v", err)
+	}
+	close(f.startupDone)
+	f.writeHashDump()
+	f.importRemoteDumps(ctx)
+
+	ticker := time.NewTicker(torrentdump.DumpInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			f.writeHashDump()
+			f.importRemoteDumps(ctx)
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (f *Fs) callJSON(ctx context.Context, opts *rest.Opts, in, out any) error {
@@ -667,9 +788,13 @@ func (f *Fs) cachedTransferCheck(ctx context.Context, transfer api.Transfer) (sr
 		return cached.src, cached.cacheHit, nil
 	}
 
-	source, err := f.transferSource(ctx, transfer)
-	if err != nil {
-		return "", false, err
+	source, ok := f.transferSources[transfer.ID]
+	if !ok {
+		source, err = f.transferSource(ctx, transfer)
+		if err != nil {
+			return "", false, err
+		}
+		f.transferSources[transfer.ID] = source
 	}
 	src = source.src
 	if src == "" {
@@ -685,6 +810,7 @@ func (f *Fs) cachedTransferCheck(ctx context.Context, transfer api.Transfer) (sr
 		fs.Debugf(f, "Premiumize cache/check skipped for usenet source: transfer_id=%s source_type=%s", transfer.ID, source.sourceType)
 		return src, false, nil
 	}
+	f.recordCompletedHashLocked(src)
 	cacheHit, err = f.cacheCheck(ctx, src)
 	if err != nil {
 		return src, false, err
@@ -696,6 +822,32 @@ func (f *Fs) cachedTransferCheck(ctx context.Context, transfer api.Transfer) (sr
 		cacheHit:  cacheHit,
 	}
 	return src, cacheHit, nil
+}
+
+func (f *Fs) rememberTransferHash(ctx context.Context, transfer api.Transfer) {
+	if _, ok := f.transferSources[transfer.ID]; ok {
+		source := f.transferSources[transfer.ID]
+		if !isUsenetSource(source) {
+			f.recordKnownHashLocked(source.src)
+		}
+		return
+	}
+	source, err := f.transferSource(ctx, transfer)
+	if err != nil {
+		fs.Debugf(f, "Premiumize transfer/source failed while remembering hash: transfer_id=%s: %v", transfer.ID, err)
+		return
+	}
+	f.transferSources[transfer.ID] = source
+	if isUsenetSource(source) {
+		f.transferChecks[transfer.ID] = transferCheck{
+			checkedAt:     time.Now(),
+			src:           source.src,
+			skipCheck:     true,
+			skipPermanent: true,
+		}
+		return
+	}
+	f.recordKnownHashLocked(source.src)
 }
 
 func (f *Fs) refresh(ctx context.Context) error {
@@ -742,6 +894,7 @@ func (f *Fs) refresh(ctx context.Context) error {
 	liveTransfers := make(map[string]struct{}, len(transfers))
 
 	for _, transfer := range transfers {
+		f.rememberTransferHash(ctx, transfer)
 		if !transferReady(transfer) {
 			continue
 		}
@@ -806,6 +959,7 @@ func (f *Fs) storeDirectDLTransfer(transfer api.Transfer, src, transferFileID, t
 		})
 	}
 	f.stored[transfer.ID] = stored
+	f.recordCompletedHashLocked(src)
 	err := f.saveStore()
 	if err != nil {
 		delete(f.stored, transfer.ID)
