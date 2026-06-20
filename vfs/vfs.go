@@ -42,6 +42,7 @@ import (
 	"github.com/rclone/rclone/fs/log"
 	"github.com/rclone/rclone/fs/rc"
 	"github.com/rclone/rclone/fs/walk"
+	"github.com/rclone/rclone/lib/jellygrail"
 	"github.com/rclone/rclone/vfs/vfscache"
 	"github.com/rclone/rclone/vfs/vfscommon"
 )
@@ -248,7 +249,10 @@ func New(ctx context.Context, f fs.Fs, opt *vfscommon.Options) *VFS {
 	features := vfs.f.Features()
 	if do := features.ChangeNotify; do != nil {
 		vfs.pollChan = make(chan time.Duration)
-		do(vfs.ctx, vfs.root.changeNotify, vfs.pollChan)
+		do(vfs.ctx, func(relativePath string, entryType fs.EntryType) {
+			vfs.root.changeNotify(relativePath, entryType)
+			jellygrail.TriggerScanAsyncDebounced(vfs.ctx, f.Name(), "change_notify:"+relativePath)
+		}, vfs.pollChan)
 		vfs.pollChan <- time.Duration(vfs.Opt.PollInterval)
 	} else if vfs.Opt.PollInterval > 0 {
 		fs.Infof(f, "poll-interval is not supported by this remote")

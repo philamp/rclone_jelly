@@ -30,6 +30,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rclone/rclone/backend/realdebrid/api"
@@ -161,6 +162,10 @@ type Fs struct {
 	dirCache     *dircache.DirCache // Map of directory path to directory id
 	pacer        *fs.Pacer          // pacer for API calls
 	tokenRenewer *oauthutil.Renew   // renew the token on expiry
+
+	mu                sync.Mutex
+	torrentStatuses   map[string]string
+	torrentStatusBase bool
 }
 
 // Object describes a file
@@ -311,6 +316,109 @@ func (f *Fs) baseParams() url.Values {
 	return params
 }
 
+func (f *Fs) listTorrentStatusPage(ctx context.Context) ([]api.Item, error) {
+	params := f.baseParams()
+	params.Set("page", "1")
+	params.Set("limit", "100")
+	opts := rest.Opts{
+		Method:     "GET",
+		Path:       "/torrents",
+		Parameters: params,
+	}
+	var resp *http.Response
+	var result []api.Item
+	var err error
+	fs.Debugf(f, "RealDebrid API call: GET /torrents page=1 limit=100")
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		fs.Debugf(f, "RealDebrid API error: GET /torrents page=1 limit=100: %v", err)
+		return nil, err
+	}
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
+	}
+	fs.Debugf(f, "RealDebrid API response: GET /torrents status=%d items=%d", status, len(result))
+	return result, nil
+}
+
+// ChangeNotify watches RealDebrid torrent statuses at the rclone poll interval.
+func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
+	go f.changeNotify(ctx, notifyFunc, pollIntervalChan)
+}
+
+func (f *Fs) changeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
+	var ticker *time.Ticker
+	var tickerC <-chan time.Time
+	for {
+		select {
+		case pollInterval, ok := <-pollIntervalChan:
+			if !ok {
+				if ticker != nil {
+					ticker.Stop()
+				}
+				return
+			}
+			if ticker != nil {
+				ticker.Stop()
+				ticker, tickerC = nil, nil
+			}
+			if pollInterval > 0 {
+				ticker = time.NewTicker(pollInterval)
+				tickerC = ticker.C
+				fs.Infof(f, "RealDebrid torrent polling enabled: interval=%v", pollInterval)
+			} else {
+				fs.Infof(f, "RealDebrid torrent polling disabled")
+			}
+		case <-tickerC:
+			items, err := f.listTorrentStatusPage(ctx)
+			if err != nil {
+				fs.Debugf(f, "RealDebrid torrent polling failed: %v", err)
+				continue
+			}
+			current := make(map[string]string, len(items))
+			downloadedTransitions := 0
+			f.mu.Lock()
+			baseline := !f.torrentStatusBase
+			for _, item := range items {
+				if item.ID == "" {
+					continue
+				}
+				status := strings.ToLower(strings.TrimSpace(item.Status))
+				current[item.ID] = status
+				if baseline || status != "downloaded" {
+					continue
+				}
+				if previous := f.torrentStatuses[item.ID]; previous != "downloaded" {
+					downloadedTransitions++
+				}
+			}
+			f.torrentStatuses = current
+			f.torrentStatusBase = true
+			f.mu.Unlock()
+			if downloadedTransitions == 0 {
+				continue
+			}
+			fs.Infof(f, "RealDebrid torrent polling detected downloaded torrent(s): count=%d", downloadedTransitions)
+			lastcheck = time.Now().Unix() - interval
+			notifyFunc("", fs.EntryDirectory)
+			if f.opt.SharedFolder == "folders" {
+				notifyFunc("shows", fs.EntryDirectory)
+				notifyFunc("movies", fs.EntryDirectory)
+				notifyFunc("default", fs.EntryDirectory)
+			}
+		case <-ctx.Done():
+			if ticker != nil {
+				ticker.Stop()
+			}
+			return
+		}
+	}
+}
+
 // NewFs constructs an Fs from the path, container:path
 func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
 	// Parse config into Options struct
@@ -339,6 +447,8 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		opt:   *opt,
 		srv:   rest.NewClient(client).SetRoot(rootURL),
 		pacer: fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+
+		torrentStatuses: make(map[string]string),
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,

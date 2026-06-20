@@ -543,7 +543,6 @@ func (f *Fs) changeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 			f.invalidateRootCache()
 			notifyFunc(string(sourceTorrent), fs.EntryDirectory)
 			notifyFunc(string(sourceUsenet), fs.EntryDirectory)
-			_ = torrentdump.TriggerJellygrailScan(ctx, "torbox", "notification")
 		case <-ctx.Done():
 			if ticker != nil {
 				ticker.Stop()

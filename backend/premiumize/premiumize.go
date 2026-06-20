@@ -631,7 +631,6 @@ func (f *Fs) changeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 			fs.Infof(f, "Premiumize transfer polling detected ready transfer(s): count=%d", newReady)
 			f.invalidateRootCache()
 			notifyFunc(sourceTorrent, fs.EntryDirectory)
-			_ = torrentdump.TriggerJellygrailScan(ctx, "premiumize", "transfer_ready")
 		case <-ctx.Done():
 			if ticker != nil {
 				ticker.Stop()
