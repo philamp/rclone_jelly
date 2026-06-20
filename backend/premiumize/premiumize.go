@@ -2,6 +2,7 @@
 package premiumize
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/gob"
@@ -44,6 +45,9 @@ const (
 	cleanupDelay     = 30 * time.Second
 	rateLimitBackoff = 5 * time.Second
 	sourceTorrent    = "torrent"
+	sourceUsenet     = "usenet"
+	subscriptionDir  = "subscription"
+	subscriptionTTL  = time.Hour
 	statusFinished   = "finished"
 	statusSeeding    = "seeding"
 )
@@ -90,13 +94,15 @@ type Fs struct {
 	storePath string
 	dumpPath  string
 
-	mu              sync.Mutex
-	cacheTime       time.Time
-	dirs            map[string]*entry
-	files           map[string]*entry
-	stored          map[string]storedTransfer
-	knownHashes     map[string]struct{}
-	completedHashes map[string]struct{}
+	mu               sync.Mutex
+	cacheTime        time.Time
+	dirs             map[string]*entry
+	files            map[string]*entry
+	stored           map[string]storedTransfer
+	knownHashes      map[string]struct{}
+	completedHashes  map[string]struct{}
+	subscriptionDays int
+	subscriptionTime time.Time
 
 	transferChecks  map[string]transferCheck
 	transferSources map[string]transferSourceInfo
@@ -124,6 +130,7 @@ type Object struct {
 	transferDirID  string
 	transferSrc    string
 	contentPath    string
+	virtual        bool
 }
 
 type openReadCloser struct {
@@ -177,6 +184,7 @@ type entry struct {
 	transferSrc    string
 	contentPath    string
 	folderID       string
+	virtual        bool
 }
 
 type storedTransfer struct {
@@ -315,7 +323,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 	go f.startRuntimeTasks(ctx)
 
-	if root != "" && root != sourceTorrent {
+	if root != "" && root != sourceTorrent && root != sourceUsenet && root != subscriptionDir {
 		err = f.refresh(ctx)
 		if err != nil {
 			return nil, err
@@ -340,6 +348,8 @@ func (f *Fs) initStaticDirs() {
 	now := time.Now()
 	f.dirs[""] = &entry{remote: "", name: "", isDir: true, id: "root", modTime: now}
 	f.dirs[sourceTorrent] = &entry{remote: sourceTorrent, name: sourceTorrent, isDir: true, id: sourceTorrent, modTime: now}
+	f.dirs[sourceUsenet] = &entry{remote: sourceUsenet, name: sourceUsenet, isDir: true, id: sourceUsenet, modTime: now}
+	f.dirs[subscriptionDir] = &entry{remote: subscriptionDir, name: subscriptionDir, isDir: true, id: subscriptionDir, modTime: now}
 }
 
 func (f *Fs) loadStore() error {
@@ -534,6 +544,8 @@ func apiResponse(out any) *api.Response {
 		return result
 	case *api.TransferListResponse:
 		return &result.Response
+	case *api.AccountInfoResponse:
+		return &result.Response
 	case *api.FolderListResponse:
 		return &result.Response
 	case *api.Item:
@@ -565,6 +577,31 @@ func (f *Fs) listTransfers(ctx context.Context) ([]api.Transfer, error) {
 	}
 	fs.Debugf(f, "Premiumize API response: GET /transfer/list items=%d", len(result.Transfers))
 	return result.Transfers, nil
+}
+
+func (f *Fs) subscriptionDaysLocked(ctx context.Context) (int, error) {
+	if !f.subscriptionTime.IsZero() && time.Since(f.subscriptionTime) < subscriptionTTL {
+		return f.subscriptionDays, nil
+	}
+	opts := rest.Opts{
+		Method: "GET",
+		Path:   "/account/info",
+	}
+	var result api.AccountInfoResponse
+	fs.Debugf(f, "Premiumize API call: GET /account/info")
+	err := f.callJSON(ctx, &opts, nil, &result)
+	if err != nil {
+		fs.Debugf(f, "Premiumize API error: GET /account/info: %v", err)
+		return 0, err
+	}
+	days := int(time.Until(time.Unix(result.PremiumUntil, 0)).Hours() / 24)
+	if days < 0 {
+		days = 0
+	}
+	f.subscriptionDays = days
+	f.subscriptionTime = time.Now()
+	fs.Debugf(f, "Premiumize API response: GET /account/info subscription_days=%d", days)
+	return days, nil
 }
 
 func (f *Fs) invalidateRootCache() {
@@ -631,6 +668,7 @@ func (f *Fs) changeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 			fs.Infof(f, "Premiumize transfer polling detected ready transfer(s): count=%d", newReady)
 			f.invalidateRootCache()
 			notifyFunc(sourceTorrent, fs.EntryDirectory)
+			notifyFunc(sourceUsenet, fs.EntryDirectory)
 		case <-ctx.Done():
 			if ticker != nil {
 				ticker.Stop()
@@ -967,6 +1005,18 @@ func (f *Fs) refresh(ctx context.Context) error {
 
 	now := time.Now()
 	addDir(sourceTorrent, now, sourceTorrent)
+	addDir(sourceUsenet, now, sourceUsenet)
+	addDir(subscriptionDir, now, subscriptionDir)
+	if days, err := f.subscriptionDaysLocked(ctx); err == nil {
+		remote := path.Join(subscriptionDir, fmt.Sprintf("%d.days", days))
+		files[remote] = &entry{
+			remote:  remote,
+			name:    path.Base(remote),
+			id:      "subscription",
+			modTime: now,
+			virtual: true,
+		}
+	}
 	liveTransfers := make(map[string]struct{}, len(transfers))
 
 	for _, transfer := range transfers {
@@ -979,7 +1029,11 @@ func (f *Fs) refresh(ctx context.Context) error {
 		if transferName == "" {
 			transferName = transfer.ID
 		}
-		baseDir := uniqueDir(dirs, path.Join(sourceTorrent, transferName), transfer.ID, now)
+		sourceRoot := sourceTorrent
+		if source, ok := f.transferSources[transfer.ID]; ok && isUsenetSource(source) {
+			sourceRoot = sourceUsenet
+		}
+		baseDir := uniqueDir(dirs, path.Join(sourceRoot, transferName), transfer.ID, now)
 		transferFileID := transfer.FileID.String()
 		transferDirID := transfer.FolderID.String()
 		dirs[baseDir].transferID = transfer.ID
@@ -1263,7 +1317,7 @@ func (f *Fs) shouldRefreshForDir(actualDir string) bool {
 	if cacheDuration <= 0 || time.Since(cacheTime) < cacheDuration {
 		return false
 	}
-	return actualDir == sourceTorrent
+	return actualDir == sourceTorrent || actualDir == sourceUsenet || actualDir == subscriptionDir
 }
 
 func (f *Fs) cachedDirExists(actualDir string) bool {
@@ -1589,6 +1643,7 @@ func (o *Object) setMetaData(info *entry) error {
 	o.transferDirID = info.transferDirID
 	o.transferSrc = info.transferSrc
 	o.contentPath = info.contentPath
+	o.virtual = info.virtual
 	return nil
 }
 
@@ -1613,6 +1668,7 @@ func (o *Object) readMetaData(ctx context.Context) error {
 		transferDirID:  obj.(*Object).transferDirID,
 		transferSrc:    obj.(*Object).transferSrc,
 		contentPath:    obj.(*Object).contentPath,
+		virtual:        obj.(*Object).virtual,
 	})
 }
 
@@ -1718,6 +1774,9 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	err := o.readMetaData(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if o.virtual {
+		return io.NopCloser(bytes.NewReader(nil)), nil
 	}
 	if o.url == "" {
 		err = o.refreshStoredDownloadURL(ctx)

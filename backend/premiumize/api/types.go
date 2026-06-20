@@ -35,6 +35,12 @@ type TransferListResponse struct {
 	Transfers []Transfer `json:"transfers"`
 }
 
+// AccountInfoResponse is returned by /account/info.
+type AccountInfoResponse struct {
+	Response
+	PremiumUntil int64 `json:"premium_until"`
+}
+
 // Transfer is a Premiumize transfer item.
 type Transfer struct {
 	ID       string         `json:"id"`

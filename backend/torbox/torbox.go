@@ -2,6 +2,7 @@
 package torbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -44,6 +45,8 @@ const (
 	requestdlFastGap   = 500 * time.Millisecond
 	requestdlMidGap    = 2 * time.Second
 	requestdlSlowGap   = 5 * time.Second
+	subscriptionDir    = "subscription"
+	subscriptionTTL    = time.Hour
 )
 
 var errReadOnly = errors.New("torbox remotes are read only")
@@ -93,32 +96,24 @@ type Fs struct {
 	pacer          *fs.Pacer
 	requestdlPacer *fs.Pacer
 
-	mu              sync.Mutex
-	cacheTime       time.Time
-	dirs            map[string]*entry
-	files           map[string]*entry
-	dlURLs          map[string]string
-	knownHashes     map[string]struct{}
-	completedHashes map[string]struct{}
-	dumpPath        string
+	mu               sync.Mutex
+	cacheTime        time.Time
+	dirs             map[string]*entry
+	files            map[string]*entry
+	dlURLs           map[string]string
+	knownHashes      map[string]struct{}
+	completedHashes  map[string]struct{}
+	dumpPath         string
+	subscriptionDays int
+	subscriptionTime time.Time
 
 	requestdlWindowMu sync.Mutex
 	requestdlCalls    []time.Time
 	lastRequestdl     time.Time
 	startupDone       chan struct{}
 
-	notificationBaselineLoaded bool
-}
-
-type torboxNotification struct {
-	ID      json.RawMessage `json:"id"`
-	Title   string          `json:"title"`
-	Message string          `json:"message"`
-}
-
-type torboxNotificationListResponse struct {
-	api.Response
-	Data []torboxNotification `json:"data"`
+	readyTransfers map[sourceType]map[int]struct{}
+	readyBaseline  bool
 }
 
 // Object describes a TorBox file.
@@ -134,6 +129,7 @@ type Object struct {
 	transferID   int
 	fileID       int
 	transferRoot string
+	virtual      bool
 }
 
 type entry struct {
@@ -148,6 +144,7 @@ type entry struct {
 	transferID   int
 	fileID       int
 	transferRoot string
+	virtual      bool
 }
 
 type sourceType string
@@ -249,6 +246,10 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		completedHashes: make(map[string]struct{}),
 		dumpPath:        torrentdump.Path("torbox"),
 		startupDone:     make(chan struct{}),
+		readyTransfers: map[sourceType]map[int]struct{}{
+			sourceTorrent: make(map[int]struct{}),
+			sourceUsenet:  make(map[int]struct{}),
+		},
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,
@@ -409,100 +410,83 @@ func (f *Fs) startRuntimeTasks(ctx context.Context) {
 	}
 }
 
-func (n torboxNotification) idString() string {
-	id := strings.TrimSpace(string(n.ID))
-	if id == "" || id == "null" {
-		return ""
-	}
-	if len(id) >= 2 && id[0] == '"' && id[len(id)-1] == '"' {
-		var decoded string
-		if err := json.Unmarshal(n.ID, &decoded); err == nil {
-			return decoded
-		}
-	}
-	return id
-}
-
-func (n torboxNotification) meansCompletion() bool {
-	text := strings.ToLower(n.Title + " " + n.Message)
-	return strings.Contains(text, "ready to download") ||
-		strings.Contains(text, "download completed") ||
-		strings.Contains(text, "download complete")
-}
-
-func (f *Fs) listCompletionNotifications(ctx context.Context) ([]torboxNotification, error) {
-	opts := rest.Opts{
-		Method: "GET",
-		Path:   "/notifications/mynotifications",
-	}
-	var resp *http.Response
-	var result torboxNotificationListResponse
-	var err error
-	fs.Debugf(f, "TorBox API call: GET /notifications/mynotifications")
-	err = f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
-		return shouldRetry(ctx, resp, err)
-	})
-	if err != nil {
-		fs.Debugf(f, "TorBox API error: GET /notifications/mynotifications: %v", err)
-		return nil, err
-	}
-	if !result.Success {
-		return nil, &result.Response
-	}
-	status := 0
-	if resp != nil {
-		status = resp.StatusCode
-	}
-	notifications := make([]torboxNotification, 0, len(result.Data))
-	for _, notification := range result.Data {
-		if notification.meansCompletion() {
-			notifications = append(notifications, notification)
-		}
-	}
-	fs.Debugf(f, "TorBox API response: GET /notifications/mynotifications status=%d completion_items=%d total_items=%d", status, len(notifications), len(result.Data))
-	return notifications, nil
-}
-
-func (f *Fs) clearNotification(ctx context.Context, notification torboxNotification) {
-	id := notification.idString()
-	if id == "" {
-		return
-	}
-	opts := rest.Opts{
-		Method: "POST",
-		Path:   "/notifications/clear/" + id,
-	}
-	var resp *http.Response
-	var result api.Response
-	var err error
-	fs.Debugf(f, "TorBox API call: POST /notifications/clear/%s", id)
-	err = f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
-		return shouldRetry(ctx, resp, err)
-	})
-	if err != nil {
-		fs.Debugf(f, "TorBox API error: POST /notifications/clear/%s: %v", id, err)
-		return
-	}
-	if !result.Success {
-		fs.Debugf(f, "TorBox API unsuccessful response: POST /notifications/clear/%s: %v", id, result.Error())
-		return
-	}
-	status := 0
-	if resp != nil {
-		status = resp.StatusCode
-	}
-	fs.Debugf(f, "TorBox API response: POST /notifications/clear/%s status=%d", id, status)
-}
-
 func (f *Fs) invalidateRootCache() {
 	f.mu.Lock()
 	f.cacheTime = time.Time{}
 	f.mu.Unlock()
 }
 
-// ChangeNotify watches TorBox completion notifications at the rclone poll interval.
+func (f *Fs) pollReadyTransfers(ctx context.Context) (map[sourceType]map[int]struct{}, error) {
+	ready := map[sourceType]map[int]struct{}{
+		sourceTorrent: make(map[int]struct{}),
+		sourceUsenet:  make(map[int]struct{}),
+	}
+	for _, source := range []sourceType{sourceTorrent, sourceUsenet} {
+		transfers, err := f.listTransfers(ctx, source)
+		if err != nil {
+			return nil, err
+		}
+		for _, transfer := range transfers {
+			if transferReady(transfer) {
+				ready[source][transfer.ID] = struct{}{}
+			}
+		}
+	}
+	return ready, nil
+}
+
+func (f *Fs) subscriptionDaysLocked(ctx context.Context) (int, error) {
+	if !f.subscriptionTime.IsZero() && time.Since(f.subscriptionTime) < subscriptionTTL {
+		return f.subscriptionDays, nil
+	}
+	params := url.Values{}
+	params.Set("settings", "false")
+	opts := rest.Opts{
+		Method:     "GET",
+		Path:       "/user/me",
+		Parameters: params,
+	}
+	var resp *http.Response
+	var result struct {
+		api.Response
+		Data struct {
+			PremiumExpiresAt string `json:"premium_expires_at"`
+		} `json:"data"`
+	}
+	var err error
+	fs.Debugf(f, "TorBox API call: GET /user/me settings=false")
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		fs.Debugf(f, "TorBox API error: GET /user/me: %v", err)
+		return 0, err
+	}
+	if !result.Success {
+		return 0, &result.Response
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, result.Data.PremiumExpiresAt)
+	if err != nil || result.Data.PremiumExpiresAt == "" {
+		f.subscriptionDays = 0
+		f.subscriptionTime = time.Now()
+		return 0, nil
+	}
+	days := int(time.Until(expiresAt).Hours() / 24)
+	if days < 0 {
+		days = 0
+	}
+	f.subscriptionDays = days
+	f.subscriptionTime = time.Now()
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
+	}
+	fs.Debugf(f, "TorBox API response: GET /user/me status=%d subscription_days=%d", status, days)
+	return days, nil
+}
+
+// ChangeNotify watches TorBox mylist readiness at the rclone poll interval.
 func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
 	go f.changeNotify(ctx, notifyFunc, pollIntervalChan)
 }
@@ -526,33 +510,49 @@ func (f *Fs) changeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 			if pollInterval > 0 {
 				ticker = time.NewTicker(pollInterval)
 				tickerC = ticker.C
-				fs.Infof(f, "TorBox notification polling enabled: interval=%v", pollInterval)
+				fs.Infof(f, "TorBox mylist polling enabled: interval=%v", pollInterval)
 			} else {
-				fs.Infof(f, "TorBox notification polling disabled")
+				fs.Infof(f, "TorBox mylist polling disabled")
 			}
 		case <-tickerC:
-			notifications, err := f.listCompletionNotifications(ctx)
+			ready, err := f.pollReadyTransfers(ctx)
 			if err != nil {
-				fs.Debugf(f, "TorBox notification polling failed: %v", err)
+				fs.Debugf(f, "TorBox mylist polling failed: %v", err)
 				continue
+			}
+			newBySource := map[sourceType]int{
+				sourceTorrent: 0,
+				sourceUsenet:  0,
 			}
 			f.mu.Lock()
-			baseline := !f.notificationBaselineLoaded
-			f.notificationBaselineLoaded = true
+			baseline := !f.readyBaseline
+			if !baseline {
+				for source, ids := range ready {
+					for id := range ids {
+						if _, ok := f.readyTransfers[source][id]; !ok {
+							newBySource[source]++
+						}
+					}
+				}
+			}
+			f.readyTransfers = ready
+			f.readyBaseline = true
 			f.mu.Unlock()
-			if len(notifications) == 0 {
-				continue
-			}
-			for _, notification := range notifications {
-				f.clearNotification(ctx, notification)
-			}
 			if baseline {
-				fs.Infof(f, "TorBox notification polling baseline loaded: completion_items=%d", len(notifications))
+				fs.Infof(f, "TorBox mylist polling baseline loaded: torrent_ready=%d usenet_ready=%d", len(ready[sourceTorrent]), len(ready[sourceUsenet]))
 				continue
 			}
+			if newBySource[sourceTorrent] == 0 && newBySource[sourceUsenet] == 0 {
+				continue
+			}
+			fs.Infof(f, "TorBox mylist polling detected ready transfer(s): torrent=%d usenet=%d", newBySource[sourceTorrent], newBySource[sourceUsenet])
 			f.invalidateRootCache()
-			notifyFunc(string(sourceTorrent), fs.EntryDirectory)
-			notifyFunc(string(sourceUsenet), fs.EntryDirectory)
+			if newBySource[sourceTorrent] > 0 {
+				notifyFunc(string(sourceTorrent), fs.EntryDirectory)
+			}
+			if newBySource[sourceUsenet] > 0 {
+				notifyFunc(string(sourceUsenet), fs.EntryDirectory)
+			}
 		case <-ctx.Done():
 			if ticker != nil {
 				ticker.Stop()
@@ -654,6 +654,17 @@ func (f *Fs) refresh(ctx context.Context) error {
 	now := time.Now()
 	addDir(string(sourceTorrent), now)
 	addDir(string(sourceUsenet), now)
+	addDir(subscriptionDir, now)
+	if days, err := f.subscriptionDaysLocked(ctx); err == nil {
+		remote := path.Join(subscriptionDir, fmt.Sprintf("%d.days", days))
+		files[remote] = &entry{
+			remote:  remote,
+			name:    path.Base(remote),
+			id:      "subscription",
+			modTime: now,
+			virtual: true,
+		}
+	}
 
 	for _, list := range lists {
 		for _, transfer := range list.items {
@@ -877,7 +888,7 @@ func (f *Fs) shouldRefreshForDir(actualDir string) bool {
 		return false
 	}
 	switch actualDir {
-	case string(sourceTorrent), string(sourceUsenet):
+	case string(sourceTorrent), string(sourceUsenet), subscriptionDir:
 		return true
 	}
 	return false
@@ -1032,6 +1043,7 @@ func (o *Object) setMetaData(info *entry) error {
 	o.transferID = info.transferID
 	o.fileID = info.fileID
 	o.transferRoot = info.transferRoot
+	o.virtual = info.virtual
 	return nil
 }
 
@@ -1053,6 +1065,7 @@ func (o *Object) readMetaData(ctx context.Context) error {
 		transferRoot: obj.(*Object).transferRoot,
 		mimeType:     obj.(*Object).mimeType,
 		id:           obj.(*Object).id,
+		virtual:      obj.(*Object).virtual,
 	})
 }
 
@@ -1303,6 +1316,9 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	err := o.readMetaData(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if o.virtual {
+		return io.NopCloser(bytes.NewReader(nil)), nil
 	}
 	if o.transferID == 0 {
 		return nil, errors.New("can't download - missing transfer ID")
