@@ -720,6 +720,25 @@ func (f *Fs) redownloadTorrent(ctx context.Context, torrent api.Item) (redownloa
 // Should return true to finish processing
 type listAllFn func(*api.Item) bool
 
+func addArtificialRootFolders(result []api.Item) []api.Item {
+	result = append(result,
+		api.Item{ID: "shows", Name: "shows", Generated: "2006-01-02T15:04:05.000Z"},
+		api.Item{ID: "movies", Name: "movies", Generated: "2006-01-02T15:04:05.000Z"},
+		api.Item{ID: "default", Name: "default", Generated: "2006-01-02T15:04:05.000Z"},
+	)
+	return result
+}
+
+func (f *Fs) ensureTorrentsListed(ctx context.Context) error {
+	if len(torrents) != 0 && time.Now().Unix()-lastcheck <= interval {
+		return nil
+	}
+	_, _, err := f.listAll(ctx, rootID, true, false, func(item *api.Item) bool {
+		return false
+	})
+	return err
+}
+
 // Lists the directory required calling the user function on each item found
 //
 // If the user fn ever returns true then it early exits with found = true
@@ -733,6 +752,10 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 	var resp *http.Response
 	if f.opt.RootFolderID == "torrents" {
 		if dirID == rootID {
+			if f.opt.SharedFolder == "folders" {
+				result = addArtificialRootFolders(result)
+				goto processResults
+			}
 			fmt.Printf("--- LISTING RCLONE REMOTE ROOT --- \n")
 			//update global cached list
 			opts := rest.Opts{
@@ -989,25 +1012,11 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 					torrents[i] = f.redownloadTorrent(ctx, torrent)
 				}
 			}
-			if f.opt.SharedFolder == "folders" {
-				var ShowsFolder api.Item
-				var MoviesFolder api.Item
-				var DefaultFolder api.Item
-				ShowsFolder.ID = "shows"
-				ShowsFolder.Name = "shows"
-				MoviesFolder.ID = "movies"
-				MoviesFolder.Name = "movies"
-				DefaultFolder.ID = "default"
-				DefaultFolder.Name = "default"
-				result = append(result, ShowsFolder)
-				result = append(result, MoviesFolder)
-				result = append(result, DefaultFolder)
-				for i := range result {
-					item := &result[i]
-					item.Generated = "2006-01-02T15:04:05.000Z"
-				}
-			}
 		} else if f.opt.SharedFolder == "folders" && (dirID == "shows" || dirID == "movies" || dirID == "default") {
+			err = f.ensureTorrentsListed(ctx)
+			if err != nil {
+				return newDirID, found, err
+			}
 			//fmt.Println("Listing torrents folders")
 			var artificialType []api.Item
 			if dirID == "shows" {
@@ -1200,6 +1209,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 			return shouldRetry(ctx, resp, err)
 		})
 	}
+processResults:
 	if err != nil {
 		return newDirID, found, fmt.Errorf("couldn't list files: %w", err)
 	}

@@ -106,6 +106,8 @@ type Fs struct {
 	requestdlCalls    []time.Time
 	lastRequestdl     time.Time
 	startupDone       chan struct{}
+
+	notificationBaselineLoaded bool
 }
 
 type torboxNotification struct {
@@ -534,11 +536,19 @@ func (f *Fs) changeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 				fs.Debugf(f, "TorBox notification polling failed: %v", err)
 				continue
 			}
+			f.mu.Lock()
+			baseline := !f.notificationBaselineLoaded
+			f.notificationBaselineLoaded = true
+			f.mu.Unlock()
 			if len(notifications) == 0 {
 				continue
 			}
 			for _, notification := range notifications {
 				f.clearNotification(ctx, notification)
+			}
+			if baseline {
+				fs.Infof(f, "TorBox notification polling baseline loaded: completion_items=%d", len(notifications))
+				continue
 			}
 			f.invalidateRootCache()
 			notifyFunc(string(sourceTorrent), fs.EntryDirectory)
