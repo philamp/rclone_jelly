@@ -26,7 +26,10 @@ const (
 
 var btihRe = regexp.MustCompile(`(?i)\b[0-9a-f]{40}\b|[a-z2-7]{32}`)
 
-var scanTargetLogOnce sync.Once
+var (
+	scanTargetLogOnce sync.Once
+	remoteDumpLogOnce sync.Once
+)
 
 // Dump is the on-disk gob format.
 type Dump struct {
@@ -52,6 +55,20 @@ func RemoteScanTargetProvider() string {
 		fs.Infof(nil, "Torrent dump remote scan target provider: %s", target)
 	})
 	return target
+}
+
+// RemoteDumpImportEnabled returns whether remote WebDAV dumps should be read.
+func RemoteDumpImportEnabled() bool {
+	location := strings.TrimSpace(os.Getenv("REMOTE_WEB_DAV_LOCATION"))
+	enabled := strings.HasPrefix(strings.ToLower(location), "http") && location != "http://hostname-or-ip:8389"
+	remoteDumpLogOnce.Do(func() {
+		if enabled {
+			fs.Infof(nil, "Torrent dump remote WebDAV import enabled: %s", location)
+			return
+		}
+		fs.Infof(nil, "Torrent dump remote WebDAV import disabled: REMOTE_WEB_DAV_LOCATION=%q", location)
+	})
+	return enabled
 }
 
 // Magnet returns a magnet URI for a hash or passes through a magnet URI.
@@ -163,6 +180,9 @@ func Read(path string) (*Dump, error) {
 
 // RemoteDumpPaths returns remote dump files mounted locally.
 func RemoteDumpPaths() []string {
+	if !RemoteDumpImportEnabled() {
+		return nil
+	}
 	paths, _ := filepath.Glob(RemoteDumpGlob)
 	sort.Strings(paths)
 	return paths
