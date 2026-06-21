@@ -19,7 +19,7 @@ import (
 
 const (
 	// DumpInterval is the default interval between local dump writes.
-	DumpInterval = 2 * time.Hour
+	DumpInterval = 15 * time.Minute
 	// RemoteDumpGlob is where remote WebDAV dumps are expected locally.
 	RemoteDumpGlob = "/mounts/remote_webdav/dumps/dump_*.gob"
 )
