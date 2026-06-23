@@ -101,6 +101,7 @@ type Fs struct {
 	stored           map[string]storedTransfer
 	knownHashes      map[string]struct{}
 	completedHashes  map[string]struct{}
+	knownNZBs        map[string]struct{}
 	subscriptionDays int
 	subscriptionTime time.Time
 
@@ -299,6 +300,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		stored:          make(map[string]storedTransfer),
 		knownHashes:     make(map[string]struct{}),
 		completedHashes: make(map[string]struct{}),
+		knownNZBs:       make(map[string]struct{}),
 		transferChecks:  make(map[string]transferCheck),
 		transferSources: make(map[string]transferSourceInfo),
 		folderCache:     make(map[string]cachedFolder),
@@ -417,6 +419,13 @@ func (f *Fs) recordCompletedHashLocked(value string) {
 	}
 }
 
+func (f *Fs) recordKnownNZBLocked(name string) {
+	filename := torrentdump.NZBFilename(name)
+	if filename != "" {
+		f.knownNZBs[filename] = struct{}{}
+	}
+}
+
 func (f *Fs) localKnownHashes() map[string]struct{} {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -433,6 +442,16 @@ func (f *Fs) localCompletedHashes() map[string]struct{} {
 	out := make(map[string]struct{}, len(f.completedHashes))
 	for hash := range f.completedHashes {
 		out[hash] = struct{}{}
+	}
+	return out
+}
+
+func (f *Fs) localKnownNZBs() map[string]struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]struct{}, len(f.knownNZBs))
+	for filename := range f.knownNZBs {
+		out[filename] = struct{}{}
 	}
 	return out
 }
@@ -482,6 +501,27 @@ func (f *Fs) importRemoteDumps(ctx context.Context) {
 			f.mu.Unlock()
 			fs.Debugf(f, "Premiumize remote dump hash imported: hash=%s provider=%s", hash, dump.Provider)
 		}
+	}
+	f.importRemoteNZBs(ctx)
+}
+
+func (f *Fs) importRemoteNZBs(ctx context.Context) {
+	local := f.localKnownNZBs()
+	for _, nzbPath := range torrentdump.RemoteNZBPaths() {
+		filename := torrentdump.NZBFilename(filepath.Base(nzbPath))
+		if _, ok := local[filename]; ok {
+			continue
+		}
+		err := f.createTransferFromNZB(ctx, nzbPath)
+		if err != nil {
+			fs.Debugf(f, "Premiumize remote NZB import failed: path=%s: %v", nzbPath, err)
+			continue
+		}
+		local[filename] = struct{}{}
+		f.mu.Lock()
+		f.knownNZBs[filename] = struct{}{}
+		f.mu.Unlock()
+		fs.Debugf(f, "Premiumize remote NZB imported: path=%s", nzbPath)
 	}
 }
 
@@ -802,6 +842,104 @@ func (f *Fs) createTransfer(ctx context.Context, src string) error {
 	return nil
 }
 
+func (f *Fs) createTransferFromNZB(ctx context.Context, nzbPath string) error {
+	in, err := os.Open(nzbPath)
+	if err != nil {
+		return err
+	}
+	defer fs.CheckClose(in, &err)
+
+	filename := torrentdump.NZBFilename(filepath.Base(nzbPath))
+	opts := rest.Opts{
+		Method:               "POST",
+		Path:                 "/transfer/create",
+		Body:                 in,
+		MultipartContentName: "src",
+		MultipartFileName:    filename,
+		MultipartContentType: "application/x-nzb",
+	}
+	var result api.TransferCreateResponse
+	fs.Debugf(f, "Premiumize API call: POST /transfer/create nzb=%s", filename)
+	err = f.callJSON(ctx, &opts, nil, &result)
+	if err != nil {
+		fs.Debugf(f, "Premiumize API error: POST /transfer/create nzb=%s: %v", filename, err)
+		return err
+	}
+	fs.Debugf(f, "Premiumize API response: POST /transfer/create nzb=%s id=%s", filename, result.ID)
+	return nil
+}
+
+func (f *Fs) dumpNZBSource(ctx context.Context, transfer api.Transfer) {
+	filename := torrentdump.NZBFilename(transfer.Name)
+	f.recordKnownNZBLocked(filename)
+
+	dumpPath := torrentdump.LocalNZBPath(filename)
+	if _, err := os.Stat(dumpPath); err == nil {
+		return
+	} else if !errors.Is(err, os.ErrNotExist) {
+		fs.Debugf(f, "Premiumize NZB dump stat failed: transfer_id=%s path=%s: %v", transfer.ID, dumpPath, err)
+		return
+	}
+	err := f.downloadNZBSource(ctx, transfer.ID, dumpPath)
+	if err != nil {
+		fs.Debugf(f, "Premiumize NZB dump download failed: transfer_id=%s path=%s: %v", transfer.ID, dumpPath, err)
+		return
+	}
+	fs.Debugf(f, "Premiumize NZB dump written: transfer_id=%s path=%s", transfer.ID, dumpPath)
+}
+
+func (f *Fs) downloadNZBSource(ctx context.Context, transferID, dumpPath string) error {
+	params := url.Values{}
+	params.Set("id", transferID)
+	opts := rest.Opts{
+		Method:     "GET",
+		Path:       "/job/src",
+		Parameters: params,
+	}
+	var resp *http.Response
+	var err error
+	fs.Debugf(f, "Premiumize API call: GET /job/src id=%s", transferID)
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.Call(ctx, &opts)
+		retry, retryErr := shouldRetry(ctx, resp, err)
+		if retry && resp != nil {
+			_, _ = rest.ReadBody(resp)
+		}
+		return retry, retryErr
+	})
+	if err != nil {
+		fs.Debugf(f, "Premiumize API error: GET /job/src id=%s: %v", transferID, err)
+		return err
+	}
+	if resp == nil {
+		return errors.New("job/src returned no response")
+	}
+	body, err := rest.ReadBody(resp)
+	if err != nil {
+		return err
+	}
+	if len(body) == 0 {
+		return errors.New("job/src returned empty NZB")
+	}
+	fs.Debugf(f, "Premiumize API response: GET /job/src id=%s bytes=%d", transferID, len(body))
+
+	err = os.MkdirAll(filepath.Dir(dumpPath), 0700)
+	if err != nil {
+		return err
+	}
+	tmpPath := dumpPath + ".tmp"
+	err = os.WriteFile(tmpPath, body, 0644)
+	if err != nil {
+		return err
+	}
+	err = os.Rename(tmpPath, dumpPath)
+	if err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return os.Chmod(dumpPath, 0644)
+}
+
 func (f *Fs) queueCleanupLocked(transferID, fileID, folderID string) {
 	if transferID == "" {
 		return
@@ -915,6 +1053,7 @@ func (f *Fs) cachedTransferCheck(ctx context.Context, transfer api.Transfer) (sr
 		return "", false, nil
 	}
 	if isUsenetSource(source) {
+		f.dumpNZBSource(ctx, transfer)
 		f.transferChecks[transfer.ID] = transferCheck{
 			checkedAt:     time.Now(),
 			src:           src,
@@ -941,7 +1080,9 @@ func (f *Fs) cachedTransferCheck(ctx context.Context, transfer api.Transfer) (sr
 func (f *Fs) rememberTransferHash(ctx context.Context, transfer api.Transfer) {
 	if _, ok := f.transferSources[transfer.ID]; ok {
 		source := f.transferSources[transfer.ID]
-		if !isUsenetSource(source) {
+		if isUsenetSource(source) {
+			f.dumpNZBSource(ctx, transfer)
+		} else {
 			f.recordKnownHashLocked(source.src)
 		}
 		return
@@ -953,6 +1094,7 @@ func (f *Fs) rememberTransferHash(ctx context.Context, transfer api.Transfer) {
 	}
 	f.transferSources[transfer.ID] = source
 	if isUsenetSource(source) {
+		f.dumpNZBSource(ctx, transfer)
 		f.transferChecks[transfer.ID] = transferCheck{
 			checkedAt:     time.Now(),
 			src:           source.src,

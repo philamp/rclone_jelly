@@ -22,6 +22,8 @@ const (
 	DumpInterval = 15 * time.Minute
 	// RemoteDumpGlob is where remote WebDAV dumps are expected locally.
 	RemoteDumpGlob = "/mounts/remote_webdav/dumps/dump_*.gob"
+	// RemoteNZBGlob is where remote WebDAV NZB dumps are expected locally.
+	RemoteNZBGlob = "/mounts/remote_webdav/dumps/*.nzb"
 )
 
 var btihRe = regexp.MustCompile(`(?i)\b[0-9a-f]{40}\b|[a-z2-7]{32}`)
@@ -41,7 +43,30 @@ type Dump struct {
 
 // Path returns the local dump path for a backend provider name.
 func Path(provider string) string {
-	return filepath.Join(config.GetCacheDir(), "dumps", "dump_"+strings.ToLower(provider)+".gob")
+	return filepath.Join(DumpDir(), "dump_"+strings.ToLower(provider)+".gob")
+}
+
+// DumpDir returns the local directory used for dump artifacts.
+func DumpDir() string {
+	return filepath.Join(config.GetCacheDir(), "dumps")
+}
+
+// NZBFilename returns the dump filename for an NZB transfer name.
+func NZBFilename(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "transfer"
+	}
+	name = strings.NewReplacer("/", "_", "\\", "_").Replace(name)
+	if strings.HasSuffix(strings.ToLower(name), ".nzb") {
+		return name
+	}
+	return name + ".nzb"
+}
+
+// LocalNZBPath returns the local path for an NZB dump filename or transfer name.
+func LocalNZBPath(name string) string {
+	return filepath.Join(DumpDir(), NZBFilename(name))
 }
 
 // RemoteScanTargetProvider returns the configured provider for remote dump imports.
@@ -184,6 +209,16 @@ func RemoteDumpPaths() []string {
 		return nil
 	}
 	paths, _ := filepath.Glob(RemoteDumpGlob)
+	sort.Strings(paths)
+	return paths
+}
+
+// RemoteNZBPaths returns remote NZB dump files mounted locally.
+func RemoteNZBPaths() []string {
+	if !RemoteDumpImportEnabled() {
+		return nil
+	}
+	paths, _ := filepath.Glob(RemoteNZBGlob)
 	sort.Strings(paths)
 	return paths
 }
