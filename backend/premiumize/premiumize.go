@@ -101,7 +101,7 @@ type Fs struct {
 	stored           map[string]storedTransfer
 	knownHashes      map[string]struct{}
 	completedHashes  map[string]struct{}
-	knownNZBs        map[string]struct{}
+	knownSourceFiles map[string]struct{}
 	subscriptionDays int
 	subscriptionTime time.Time
 
@@ -151,6 +151,7 @@ type transferCheck struct {
 type transferSourceInfo struct {
 	src        string
 	sourceType string
+	sourceExt  string
 }
 
 type cachedFolder struct {
@@ -287,27 +288,27 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	srv.SetErrorHandler(errorHandler)
 
 	f := &Fs{
-		name:            name,
-		root:            root,
-		opt:             *opt,
-		srv:             srv,
-		dlSrv:           rest.NewClient(client),
-		pacer:           fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
-		storePath:       premiumizeStorePath(name, root),
-		dumpPath:        torrentdump.Path("premiumize"),
-		dirs:            make(map[string]*entry),
-		files:           make(map[string]*entry),
-		stored:          make(map[string]storedTransfer),
-		knownHashes:     make(map[string]struct{}),
-		completedHashes: make(map[string]struct{}),
-		knownNZBs:       make(map[string]struct{}),
-		transferChecks:  make(map[string]transferCheck),
-		transferSources: make(map[string]transferSourceInfo),
-		folderCache:     make(map[string]cachedFolder),
-		activeOpens:     make(map[string]int),
-		pendingCleanup:  make(map[string]pendingCleanup),
-		readyTransfers:  make(map[string]struct{}),
-		startupDone:     make(chan struct{}),
+		name:             name,
+		root:             root,
+		opt:              *opt,
+		srv:              srv,
+		dlSrv:            rest.NewClient(client),
+		pacer:            fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+		storePath:        premiumizeStorePath(name, root),
+		dumpPath:         torrentdump.Path("premiumize"),
+		dirs:             make(map[string]*entry),
+		files:            make(map[string]*entry),
+		stored:           make(map[string]storedTransfer),
+		knownHashes:      make(map[string]struct{}),
+		completedHashes:  make(map[string]struct{}),
+		knownSourceFiles: make(map[string]struct{}),
+		transferChecks:   make(map[string]transferCheck),
+		transferSources:  make(map[string]transferSourceInfo),
+		folderCache:      make(map[string]cachedFolder),
+		activeOpens:      make(map[string]int),
+		pendingCleanup:   make(map[string]pendingCleanup),
+		readyTransfers:   make(map[string]struct{}),
+		startupDone:      make(chan struct{}),
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,
@@ -322,6 +323,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	for _, stored := range f.stored {
 		f.recordKnownHashLocked(stored.Src)
 		f.recordCompletedHashLocked(stored.Src)
+		f.recordStoredSourceFileLocked(stored)
 	}
 	go f.startRuntimeTasks(ctx)
 
@@ -419,10 +421,17 @@ func (f *Fs) recordCompletedHashLocked(value string) {
 	}
 }
 
-func (f *Fs) recordKnownNZBLocked(name string) {
-	filename := torrentdump.NZBFilename(name)
+func (f *Fs) recordKnownSourceFileLocked(name, ext string) {
+	filename := torrentdump.SourceFilename(name, ext)
 	if filename != "" {
-		f.knownNZBs[filename] = struct{}{}
+		f.knownSourceFiles[filename] = struct{}{}
+	}
+}
+
+func (f *Fs) recordStoredSourceFileLocked(stored storedTransfer) {
+	ext := sourceFileExtFromTransferName(stored.Name)
+	if ext != "" {
+		f.recordKnownSourceFileLocked(stored.Name, ext)
 	}
 }
 
@@ -446,11 +455,11 @@ func (f *Fs) localCompletedHashes() map[string]struct{} {
 	return out
 }
 
-func (f *Fs) localKnownNZBs() map[string]struct{} {
+func (f *Fs) localKnownSourceFiles() map[string]struct{} {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make(map[string]struct{}, len(f.knownNZBs))
-	for filename := range f.knownNZBs {
+	out := make(map[string]struct{}, len(f.knownSourceFiles))
+	for filename := range f.knownSourceFiles {
 		out[filename] = struct{}{}
 	}
 	return out
@@ -475,6 +484,11 @@ func (f *Fs) importRemoteDumps(ctx context.Context) {
 	if !premiumizeIsScanTarget() {
 		return
 	}
+	state, err := torrentdump.ReadImportState("premiumize")
+	if err != nil {
+		fs.Debugf(f, "Premiumize remote dump import state read failed: %v", err)
+		state = &torrentdump.ImportState{HashIncrements: make(map[string]uint64)}
+	}
 	local := f.localKnownHashes()
 	for _, dumpPath := range torrentdump.RemoteDumpPaths() {
 		dump, err := torrentdump.Read(dumpPath)
@@ -482,46 +496,70 @@ func (f *Fs) importRemoteDumps(ctx context.Context) {
 			fs.Debugf(f, "Premiumize remote dump read failed: path=%s: %v", dumpPath, err)
 			continue
 		}
-		for _, hash := range dump.Hashes {
-			hash = torrentdump.NormalizeHash(hash)
+		dumpKey := dump.Provider
+		for _, entry := range dump.Hashes {
+			hash := torrentdump.NormalizeHash(entry.Hash)
 			if hash == "" {
 				continue
 			}
+			if entry.Increment > 0 && entry.Increment <= state.HashIncrements[dumpKey] {
+				continue
+			}
 			if _, ok := local[hash]; ok {
+				if entry.Increment > state.HashIncrements[dumpKey] {
+					state.HashIncrements[dumpKey] = entry.Increment
+				}
 				continue
 			}
 			err = f.createTransfer(ctx, torrentdump.Magnet(hash))
 			if err != nil {
 				fs.Debugf(f, "Premiumize remote dump import failed: hash=%s provider=%s: %v", hash, dump.Provider, err)
-				continue
+				break
 			}
 			local[hash] = struct{}{}
 			f.mu.Lock()
 			f.knownHashes[hash] = struct{}{}
 			f.mu.Unlock()
+			if entry.Increment > state.HashIncrements[dumpKey] {
+				state.HashIncrements[dumpKey] = entry.Increment
+			}
 			fs.Debugf(f, "Premiumize remote dump hash imported: hash=%s provider=%s", hash, dump.Provider)
 		}
 	}
-	f.importRemoteNZBs(ctx)
+	f.importRemoteSourceFiles(ctx, state)
+	err = torrentdump.WriteImportState("premiumize", state)
+	if err != nil {
+		fs.Debugf(f, "Premiumize remote dump import state write failed: %v", err)
+	}
 }
 
-func (f *Fs) importRemoteNZBs(ctx context.Context) {
-	local := f.localKnownNZBs()
-	for _, nzbPath := range torrentdump.RemoteNZBPaths() {
-		filename := torrentdump.NZBFilename(filepath.Base(nzbPath))
-		if _, ok := local[filename]; ok {
+func (f *Fs) importRemoteSourceFiles(ctx context.Context, state *torrentdump.ImportState) {
+	local := f.localKnownSourceFiles()
+	for _, sourcePath := range torrentdump.RemoteSourcePaths() {
+		increment := torrentdump.SourcePathIncrement(sourcePath)
+		if increment > 0 && increment <= state.SourceFileIncrement {
 			continue
 		}
-		err := f.createTransferFromNZB(ctx, nzbPath)
-		if err != nil {
-			fs.Debugf(f, "Premiumize remote NZB import failed: path=%s: %v", nzbPath, err)
+		filename := torrentdump.SourceComparableFilename(sourcePath)
+		if _, ok := local[filename]; ok {
+			if increment > state.SourceFileIncrement {
+				state.SourceFileIncrement = increment
+			}
 			continue
+		}
+		err := f.createTransferFromSourceFile(ctx, sourcePath)
+		if err != nil {
+			fs.Debugf(f, "Premiumize remote source file import failed: path=%s: %v", sourcePath, err)
+			break
 		}
 		local[filename] = struct{}{}
 		f.mu.Lock()
-		f.knownNZBs[filename] = struct{}{}
+		f.knownSourceFiles[filename] = struct{}{}
 		f.mu.Unlock()
-		fs.Debugf(f, "Premiumize remote NZB imported: path=%s", nzbPath)
+		if increment > state.SourceFileIncrement {
+			state.SourceFileIncrement = increment
+		}
+		fs.Debugf(f, "Premiumize remote source file imported: path=%s", sourcePath)
 	}
 }
 
@@ -842,53 +880,83 @@ func (f *Fs) createTransfer(ctx context.Context, src string) error {
 	return nil
 }
 
-func (f *Fs) createTransferFromNZB(ctx context.Context, nzbPath string) error {
-	in, err := os.Open(nzbPath)
+func (f *Fs) createTransferFromSourceFile(ctx context.Context, sourcePath string) error {
+	in, err := os.Open(sourcePath)
 	if err != nil {
 		return err
 	}
 	defer fs.CheckClose(in, &err)
 
-	filename := torrentdump.NZBFilename(filepath.Base(nzbPath))
+	ext := strings.ToLower(filepath.Ext(sourcePath))
+	filename := torrentdump.SourceFilename(filepath.Base(sourcePath), ext)
 	opts := rest.Opts{
 		Method:               "POST",
 		Path:                 "/transfer/create",
 		Body:                 in,
 		MultipartContentName: "src",
 		MultipartFileName:    filename,
-		MultipartContentType: "application/x-nzb",
+		MultipartContentType: sourceFileContentType(ext),
 	}
 	var result api.TransferCreateResponse
-	fs.Debugf(f, "Premiumize API call: POST /transfer/create nzb=%s", filename)
+	fs.Debugf(f, "Premiumize API call: POST /transfer/create source_file=%s", filename)
 	err = f.callJSON(ctx, &opts, nil, &result)
 	if err != nil {
-		fs.Debugf(f, "Premiumize API error: POST /transfer/create nzb=%s: %v", filename, err)
+		fs.Debugf(f, "Premiumize API error: POST /transfer/create source_file=%s: %v", filename, err)
 		return err
 	}
-	fs.Debugf(f, "Premiumize API response: POST /transfer/create nzb=%s id=%s", filename, result.ID)
+	fs.Debugf(f, "Premiumize API response: POST /transfer/create source_file=%s id=%s", filename, result.ID)
 	return nil
 }
 
-func (f *Fs) dumpNZBSource(ctx context.Context, transfer api.Transfer) {
-	filename := torrentdump.NZBFilename(transfer.Name)
-	f.recordKnownNZBLocked(filename)
-
-	dumpPath := torrentdump.LocalNZBPath(filename)
-	if _, err := os.Stat(dumpPath); err == nil {
-		return
-	} else if !errors.Is(err, os.ErrNotExist) {
-		fs.Debugf(f, "Premiumize NZB dump stat failed: transfer_id=%s path=%s: %v", transfer.ID, dumpPath, err)
-		return
+func sourceFileContentType(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".torrent":
+		return "application/x-bittorrent"
+	case ".nzb":
+		return "application/x-nzb"
+	default:
+		return "application/octet-stream"
 	}
-	err := f.downloadNZBSource(ctx, transfer.ID, dumpPath)
-	if err != nil {
-		fs.Debugf(f, "Premiumize NZB dump download failed: transfer_id=%s path=%s: %v", transfer.ID, dumpPath, err)
-		return
-	}
-	fs.Debugf(f, "Premiumize NZB dump written: transfer_id=%s path=%s", transfer.ID, dumpPath)
 }
 
-func (f *Fs) downloadNZBSource(ctx context.Context, transferID, dumpPath string) error {
+func (f *Fs) dumpSourceFile(ctx context.Context, transfer api.Transfer, source transferSourceInfo) transferSourceInfo {
+	if source.sourceExt == "" {
+		source.sourceExt = sourceFileExtFromTransferName(transfer.Name)
+	}
+	if source.sourceExt == "" {
+		fs.Debugf(f, "Premiumize source file dump skipped, unknown extension: transfer_id=%s name=%q", transfer.ID, transfer.Name)
+		return source
+	}
+	if source.sourceExt != "" {
+		f.recordKnownSourceFileLocked(transfer.Name, source.sourceExt)
+		dumpPath := torrentdump.LocalSourcePath(transfer.Name, source.sourceExt)
+		if _, err := os.Stat(dumpPath); err == nil {
+			return source
+		}
+	}
+	body, err := f.downloadSourceFile(ctx, transfer.ID)
+	if err != nil {
+		fs.Debugf(f, "Premiumize source file dump download failed: transfer_id=%s: %v", transfer.ID, err)
+		return source
+	}
+
+	dumpPath := torrentdump.LocalSourcePath(transfer.Name, source.sourceExt)
+	if _, err := os.Stat(dumpPath); err == nil {
+		return source
+	} else if !errors.Is(err, os.ErrNotExist) {
+		fs.Debugf(f, "Premiumize source file dump stat failed: transfer_id=%s path=%s: %v", transfer.ID, dumpPath, err)
+		return source
+	}
+	err = writeSourceDump(dumpPath, body)
+	if err != nil {
+		fs.Debugf(f, "Premiumize source file dump write failed: transfer_id=%s path=%s: %v", transfer.ID, dumpPath, err)
+		return source
+	}
+	fs.Debugf(f, "Premiumize source file dump written: transfer_id=%s path=%s", transfer.ID, dumpPath)
+	return source
+}
+
+func (f *Fs) downloadSourceFile(ctx context.Context, transferID string) ([]byte, error) {
 	params := url.Values{}
 	params.Set("id", transferID)
 	opts := rest.Opts{
@@ -909,21 +977,38 @@ func (f *Fs) downloadNZBSource(ctx context.Context, transferID, dumpPath string)
 	})
 	if err != nil {
 		fs.Debugf(f, "Premiumize API error: GET /job/src id=%s: %v", transferID, err)
-		return err
+		return nil, err
 	}
 	if resp == nil {
-		return errors.New("job/src returned no response")
+		return nil, errors.New("job/src returned no response")
 	}
 	body, err := rest.ReadBody(resp)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(body) == 0 {
-		return errors.New("job/src returned empty NZB")
+		return nil, errors.New("job/src returned empty source file")
 	}
 	fs.Debugf(f, "Premiumize API response: GET /job/src id=%s bytes=%d", transferID, len(body))
+	return body, nil
+}
 
-	err = os.MkdirAll(filepath.Dir(dumpPath), 0700)
+func sourceFileExtFromTransferName(value string) string {
+	value = strings.ToLower(value)
+	nzbIndex := strings.LastIndex(value, ".nzb")
+	torrentIndex := strings.LastIndex(value, ".torrent")
+	switch {
+	case nzbIndex < 0 && torrentIndex < 0:
+		return ""
+	case torrentIndex > nzbIndex:
+		return ".torrent"
+	default:
+		return ".nzb"
+	}
+}
+
+func writeSourceDump(dumpPath string, body []byte) error {
+	err := os.MkdirAll(filepath.Dir(dumpPath), 0700)
 	if err != nil {
 		return err
 	}
@@ -1028,9 +1113,13 @@ func (f *Fs) queueStoredCleanupsLocked() {
 	}
 }
 
-func isUsenetSource(source transferSourceInfo) bool {
-	sourceType := strings.ToLower(strings.TrimSpace(source.sourceType))
+func isUsenetTransfer(transfer api.Transfer) bool {
+	return sourceFileExtFromTransferName(transfer.Name) == ".nzb"
+}
+
+func isSourceFileSource(source transferSourceInfo) bool {
 	src := strings.ToLower(strings.TrimSpace(source.src))
+	sourceType := strings.ToLower(strings.TrimSpace(source.sourceType))
 	return sourceType == "file" && (src == "/api/job/src" || strings.HasPrefix(src, "/api/job/src?"))
 }
 
@@ -1052,15 +1141,29 @@ func (f *Fs) cachedTransferCheck(ctx context.Context, transfer api.Transfer) (sr
 	if src == "" {
 		return "", false, nil
 	}
-	if isUsenetSource(source) {
-		f.dumpNZBSource(ctx, transfer)
+	if isSourceFileSource(source) {
+		source = f.dumpSourceFile(ctx, transfer, source)
+		f.transferSources[transfer.ID] = source
+		if !isUsenetTransfer(transfer) {
+			f.recordKnownHashLocked(src)
+			cacheHit, err = f.cacheCheck(ctx, src)
+			if err != nil {
+				return src, false, err
+			}
+			f.transferChecks[transfer.ID] = transferCheck{
+				checkedAt: time.Now(),
+				src:       src,
+				cacheHit:  cacheHit,
+			}
+			return src, cacheHit, nil
+		}
 		f.transferChecks[transfer.ID] = transferCheck{
 			checkedAt:     time.Now(),
 			src:           src,
 			skipCheck:     true,
 			skipPermanent: true,
 		}
-		fs.Debugf(f, "Premiumize cache/check skipped for usenet source: transfer_id=%s source_type=%s", transfer.ID, source.sourceType)
+		fs.Debugf(f, "Premiumize cache/check skipped for usenet source file: transfer_id=%s source_type=%s source_ext=%s", transfer.ID, source.sourceType, source.sourceExt)
 		return src, false, nil
 	}
 	f.recordCompletedHashLocked(src)
@@ -1080,8 +1183,12 @@ func (f *Fs) cachedTransferCheck(ctx context.Context, transfer api.Transfer) (sr
 func (f *Fs) rememberTransferHash(ctx context.Context, transfer api.Transfer) {
 	if _, ok := f.transferSources[transfer.ID]; ok {
 		source := f.transferSources[transfer.ID]
-		if isUsenetSource(source) {
-			f.dumpNZBSource(ctx, transfer)
+		if isSourceFileSource(source) {
+			source = f.dumpSourceFile(ctx, transfer, source)
+			f.transferSources[transfer.ID] = source
+			if !isUsenetTransfer(transfer) {
+				f.recordKnownHashLocked(source.src)
+			}
 		} else {
 			f.recordKnownHashLocked(source.src)
 		}
@@ -1093,13 +1200,18 @@ func (f *Fs) rememberTransferHash(ctx context.Context, transfer api.Transfer) {
 		return
 	}
 	f.transferSources[transfer.ID] = source
-	if isUsenetSource(source) {
-		f.dumpNZBSource(ctx, transfer)
-		f.transferChecks[transfer.ID] = transferCheck{
-			checkedAt:     time.Now(),
-			src:           source.src,
-			skipCheck:     true,
-			skipPermanent: true,
+	if isSourceFileSource(source) {
+		source = f.dumpSourceFile(ctx, transfer, source)
+		f.transferSources[transfer.ID] = source
+		if isUsenetTransfer(transfer) {
+			f.transferChecks[transfer.ID] = transferCheck{
+				checkedAt:     time.Now(),
+				src:           source.src,
+				skipCheck:     true,
+				skipPermanent: true,
+			}
+		} else {
+			f.recordKnownHashLocked(source.src)
 		}
 		return
 	}
@@ -1172,7 +1284,7 @@ func (f *Fs) refresh(ctx context.Context) error {
 			transferName = transfer.ID
 		}
 		sourceRoot := sourceTorrent
-		if source, ok := f.transferSources[transfer.ID]; ok && isUsenetSource(source) {
+		if isUsenetTransfer(transfer) {
 			sourceRoot = sourceUsenet
 		}
 		baseDir := uniqueDir(dirs, path.Join(sourceRoot, transferName), transfer.ID, now)
@@ -1232,6 +1344,7 @@ func (f *Fs) storeDirectDLTransfer(transfer api.Transfer, src, transferFileID, t
 	}
 	f.stored[transfer.ID] = stored
 	f.recordCompletedHashLocked(src)
+	f.recordStoredSourceFileLocked(stored)
 	err := f.saveStore()
 	if err != nil {
 		delete(f.stored, transfer.ID)

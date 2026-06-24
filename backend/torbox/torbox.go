@@ -359,6 +359,11 @@ func (f *Fs) importRemoteDumps(ctx context.Context) {
 	if !torboxIsScanTarget() {
 		return
 	}
+	state, err := torrentdump.ReadImportState("torbox")
+	if err != nil {
+		fs.Debugf(f, "TorBox remote dump import state read failed: %v", err)
+		state = &torrentdump.ImportState{HashIncrements: make(map[string]uint64)}
+	}
 	local := f.localKnownHashes()
 	for _, dumpPath := range torrentdump.RemoteDumpPaths() {
 		dump, err := torrentdump.Read(dumpPath)
@@ -366,25 +371,39 @@ func (f *Fs) importRemoteDumps(ctx context.Context) {
 			fs.Debugf(f, "TorBox remote dump read failed: path=%s: %v", dumpPath, err)
 			continue
 		}
-		for _, hash := range dump.Hashes {
-			hash = torrentdump.NormalizeHash(hash)
+		dumpKey := dump.Provider
+		for _, entry := range dump.Hashes {
+			hash := torrentdump.NormalizeHash(entry.Hash)
 			if hash == "" {
 				continue
 			}
+			if entry.Increment > 0 && entry.Increment <= state.HashIncrements[dumpKey] {
+				continue
+			}
 			if _, ok := local[hash]; ok {
+				if entry.Increment > state.HashIncrements[dumpKey] {
+					state.HashIncrements[dumpKey] = entry.Increment
+				}
 				continue
 			}
 			err = f.createTorrent(ctx, hash)
 			if err != nil {
 				fs.Debugf(f, "TorBox remote dump import failed: hash=%s provider=%s: %v", hash, dump.Provider, err)
-				continue
+				break
 			}
 			local[hash] = struct{}{}
 			f.mu.Lock()
 			f.knownHashes[hash] = struct{}{}
 			f.mu.Unlock()
+			if entry.Increment > state.HashIncrements[dumpKey] {
+				state.HashIncrements[dumpKey] = entry.Increment
+			}
 			fs.Debugf(f, "TorBox remote dump hash imported: hash=%s provider=%s", hash, dump.Provider)
 		}
+	}
+	err = torrentdump.WriteImportState("torbox", state)
+	if err != nil {
+		fs.Debugf(f, "TorBox remote dump import state write failed: %v", err)
 	}
 }
 
