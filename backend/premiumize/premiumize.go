@@ -163,12 +163,10 @@ type cachedFolder struct {
 
 type pendingCleanup struct {
 	transferID string
-	fileID     string
-	folderID   string
 }
 
 func (c pendingCleanup) empty() bool {
-	return c.transferID == "" || (c.fileID == "" && c.folderID == "")
+	return c.transferID == ""
 }
 
 type entry struct {
@@ -257,6 +255,23 @@ func errorHandler(resp *http.Response) error {
 		e.Message = resp.Status
 	}
 	return &e
+}
+
+func isMissingCloudItemError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var response *api.Response
+	if errors.As(err, &response) {
+		msg := strings.ToLower(response.Message)
+		return strings.Contains(msg, "file not found") ||
+			strings.Contains(msg, "not your file") ||
+			strings.Contains(msg, "folder not found")
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "file not found") ||
+		strings.Contains(msg, "not your file") ||
+		strings.Contains(msg, "folder not found")
 }
 
 // Name of the remote.
@@ -690,6 +705,25 @@ func (f *Fs) invalidateRootCache() {
 	f.mu.Unlock()
 }
 
+func (f *Fs) forgetCachedDirLocked(actualDir, cacheKey string) {
+	actualDir = strings.Trim(actualDir, "/")
+	if cacheKey != "" {
+		delete(f.folderCache, cacheKey)
+	}
+	delete(f.dirs, actualDir)
+	for remote := range f.dirs {
+		if parentOrSelf(actualDir, remote) {
+			delete(f.dirs, remote)
+		}
+	}
+	for remote := range f.files {
+		if parentOrSelf(actualDir, remote) {
+			delete(f.files, remote)
+		}
+	}
+	f.cacheTime = time.Time{}
+}
+
 // ChangeNotify watches transfer/list at the rclone poll interval.
 func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
 	go f.changeNotify(ctx, notifyFunc, pollIntervalChan)
@@ -1023,14 +1057,12 @@ func writeSourceDump(dumpPath string, body []byte) error {
 	return os.Chmod(dumpPath, 0644)
 }
 
-func (f *Fs) queueCleanupLocked(transferID, fileID, folderID string) {
+func (f *Fs) queueCleanupLocked(transferID string) {
 	if transferID == "" {
 		return
 	}
 	f.pendingCleanup[transferID] = pendingCleanup{
 		transferID: transferID,
-		fileID:     fileID,
-		folderID:   folderID,
 	}
 	fs.Debugf(f, "Premiumize cloud cleanup deferred: transfer_id=%s active_opens=%d delay=%v", transferID, f.activeOpens[transferID], cleanupDelay)
 	go f.runPendingCleanupAfter(transferID, cleanupDelay)
@@ -1052,7 +1084,6 @@ func (f *Fs) runPendingCleanupAfter(transferID string, delay time.Duration) {
 	f.mu.Unlock()
 
 	if !cleanup.empty() {
-		fs.Debugf(f, "Premiumize deferred cloud cleanup starting: transfer_id=%s", cleanup.transferID)
 		err := f.runCloudCleanup(context.Background(), cleanup)
 		if err != nil {
 			fs.Debugf(f, "Premiumize deferred cloud cleanup failed: transfer_id=%s: %v", cleanup.transferID, err)
@@ -1086,7 +1117,6 @@ func (f *Fs) finishOpen(transferID string) {
 	f.mu.Unlock()
 
 	if !cleanup.empty() {
-		fs.Debugf(f, "Premiumize deferred cloud cleanup starting: transfer_id=%s", cleanup.transferID)
 		err := f.runCloudCleanup(context.Background(), cleanup)
 		if err != nil {
 			fs.Debugf(f, "Premiumize deferred cloud cleanup failed: transfer_id=%s: %v", cleanup.transferID, err)
@@ -1098,8 +1128,9 @@ func (f *Fs) queueStoredCleanupsLocked() {
 	for transferID, stored := range f.stored {
 		cleanup := pendingCleanup{
 			transferID: transferID,
-			fileID:     stored.FileID,
-			folderID:   stored.FolderID,
+		}
+		if stored.FileID == "" && stored.FolderID == "" {
+			continue
 		}
 		if cleanup.empty() {
 			continue
@@ -1107,7 +1138,7 @@ func (f *Fs) queueStoredCleanupsLocked() {
 		if _, ok := f.pendingCleanup[transferID]; ok {
 			continue
 		}
-		f.queueCleanupLocked(cleanup.transferID, cleanup.fileID, cleanup.folderID)
+		f.queueCleanupLocked(cleanup.transferID)
 	}
 }
 
@@ -1305,7 +1336,7 @@ func (f *Fs) refresh(ctx context.Context) error {
 			} else {
 				err = f.storeDirectDLTransfer(transfer, src, transferFileID, transferDirID, content)
 				if err == nil {
-					f.queueCleanupLocked(transfer.ID, transferFileID, transferDirID)
+					f.queueCleanupLocked(transfer.ID)
 				} else {
 					fs.Errorf(f, "Premiumize persistent transfer cache failed for transfer %s, keeping cloud item: %v", transfer.ID, err)
 				}
@@ -1538,6 +1569,15 @@ func parentDir(remote string) string {
 	return parent
 }
 
+func parentOrSelf(parent, remote string) bool {
+	parent = strings.Trim(parent, "/")
+	remote = strings.Trim(remote, "/")
+	if parent == "" {
+		return remote != ""
+	}
+	return remote == parent || strings.HasPrefix(remote, parent+"/")
+}
+
 func (f *Fs) actualPath(remote string) string {
 	remote = strings.Trim(remote, "/")
 	if f.root == "" {
@@ -1670,12 +1710,26 @@ func (f *Fs) ensureDirLoaded(ctx context.Context, actualDir string) error {
 		var folder *api.FolderListResponse
 		folder, err = f.listFolder(ctx, infoCopy.folderID)
 		if err != nil {
+			if isMissingCloudItemError(err) {
+				f.mu.Lock()
+				f.forgetCachedDirLocked(actualDir, cacheKey)
+				f.mu.Unlock()
+				fs.Debugf(f, "Premiumize stale cloud folder removed from local cache: dir=%s folder_id=%s", actualDir, infoCopy.folderID)
+				return fs.ErrorDirNotFound
+			}
 			return err
 		}
 		folderContent = append(folderContent, folder.Content...)
 	} else if infoCopy.transferFileID != "" {
 		singleFile, err = f.itemDetails(ctx, infoCopy.transferFileID)
 		if err != nil {
+			if isMissingCloudItemError(err) {
+				f.mu.Lock()
+				f.forgetCachedDirLocked(actualDir, cacheKey)
+				f.mu.Unlock()
+				fs.Debugf(f, "Premiumize stale cloud file removed from local cache: dir=%s file_id=%s", actualDir, infoCopy.transferFileID)
+				return fs.ErrorDirNotFound
+			}
 			return err
 		}
 	}
@@ -2082,48 +2136,10 @@ func (f *Fs) deleteTransferRecord(ctx context.Context, transferID string) error 
 	return nil
 }
 
-func (f *Fs) deleteCloudItem(ctx context.Context, fileID, folderID string) error {
-	if folderID != "" {
-		params := url.Values{}
-		params.Set("id", folderID)
-		opts := rest.Opts{
-			Method:          "POST",
-			Path:            "/folder/delete",
-			MultipartParams: params,
-		}
-		var result api.Response
-		fs.Debugf(f, "Premiumize API call: POST /folder/delete id=%s", folderID)
-		err := f.callJSON(ctx, &opts, nil, &result)
-		if err != nil {
-			fs.Debugf(f, "Premiumize API error: POST /folder/delete id=%s: %v", folderID, err)
-			return err
-		}
-		fs.Debugf(f, "Premiumize API response: POST /folder/delete id=%s", folderID)
-		return nil
-	}
-	if fileID != "" {
-		params := url.Values{}
-		params.Set("id", fileID)
-		opts := rest.Opts{
-			Method:          "POST",
-			Path:            "/item/delete",
-			MultipartParams: params,
-		}
-		var result api.Response
-		fs.Debugf(f, "Premiumize API call: POST /item/delete id=%s", fileID)
-		err := f.callJSON(ctx, &opts, nil, &result)
-		if err != nil {
-			fs.Debugf(f, "Premiumize API error: POST /item/delete id=%s: %v", fileID, err)
-			return err
-		}
-		fs.Debugf(f, "Premiumize API response: POST /item/delete id=%s", fileID)
-	}
-	return nil
-}
-
 func (f *Fs) runCloudCleanup(ctx context.Context, cleanup pendingCleanup) error {
 	f.cleanupMu.Lock()
 	defer f.cleanupMu.Unlock()
+	fs.Debugf(f, "Premiumize deferred cloud cleanup starting: transfer_id=%s", cleanup.transferID)
 	return f.completeCloudCleanup(ctx, cleanup)
 }
 
@@ -2141,12 +2157,12 @@ func (f *Fs) completeCloudCleanup(ctx context.Context, cleanup pendingCleanup) e
 	if cleanup.empty() {
 		return nil
 	}
-	err := f.deleteCloudItem(ctx, cleanup.fileID, cleanup.folderID)
+	err := f.deleteTransferRecord(ctx, cleanup.transferID)
 	if err != nil {
 		if !isTerminalCloudDeleteError(err) {
 			return err
 		}
-		fs.Debugf(f, "Premiumize cloud cleanup marking terminal delete error as done: transfer_id=%s: %v", cleanup.transferID, err)
+		fs.Debugf(f, "Premiumize transfer cleanup marking terminal delete error as done: transfer_id=%s: %v", cleanup.transferID, err)
 	}
 
 	f.mu.Lock()
@@ -2162,7 +2178,7 @@ func (f *Fs) completeCloudCleanup(ctx context.Context, cleanup pendingCleanup) e
 	if err != nil {
 		return err
 	}
-	fs.Debugf(f, "Premiumize cloud cleanup marked done in persistent cache: transfer_id=%s", cleanup.transferID)
+	fs.Debugf(f, "Premiumize transfer cleanup marked done in persistent cache: transfer_id=%s", cleanup.transferID)
 	return nil
 }
 
@@ -2216,14 +2232,7 @@ func (o *Object) Remove(ctx context.Context) error {
 		return errors.New("can't delete - missing transfer ID")
 	}
 	isStored := o.fs.hasStoredTransfer(o.transferID)
-	fs.Debugf(o, "Deleting containing Premiumize transfer: transfer_id=%s file_id=%s folder_id=%s", o.transferID, o.transferFileID, o.transferDirID)
-	err = o.fs.deleteCloudItem(ctx, o.transferFileID, o.transferDirID)
-	if err != nil {
-		if !isStored {
-			return err
-		}
-		fs.Debugf(o, "Ignoring Premiumize cloud delete error for stored transfer %s: %v", o.transferID, err)
-	}
+	fs.Debugf(o, "Deleting containing Premiumize transfer: transfer_id=%s", o.transferID)
 	err = o.fs.deleteTransferRecord(ctx, o.transferID)
 	if err != nil {
 		if !isStored {
