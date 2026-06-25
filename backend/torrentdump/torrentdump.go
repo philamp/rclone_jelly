@@ -25,9 +25,9 @@ const (
 	// RemoteDumpGlob is where remote WebDAV dumps are expected locally.
 	RemoteDumpGlob = "/mounts/remote_webdav/dumps/dump_*.gob"
 	// RemoteNZBGlob is where remote WebDAV NZB dumps are expected locally.
-	RemoteNZBGlob = "/mounts/remote_webdav/dumps/*.nzb"
+	RemoteNZBGlob = "/mounts/remote_webdav/dumps/*/*.nzb"
 	// RemoteTorrentGlob is where remote WebDAV torrent dumps are expected locally.
-	RemoteTorrentGlob = "/mounts/remote_webdav/dumps/*.torrent"
+	RemoteTorrentGlob = "/mounts/remote_webdav/dumps/*/*.torrent"
 	incrementWidth    = 10
 )
 
@@ -54,9 +54,9 @@ type HashEntry struct {
 
 // ImportState tracks the last imported remote dump increments.
 type ImportState struct {
-	Version             int
-	HashIncrements      map[string]uint64
-	SourceFileIncrement uint64
+	Version              int
+	HashIncrements       map[string]uint64
+	SourceFileIncrements map[string]uint64
 }
 
 // Path returns the local dump path for a backend provider name.
@@ -69,15 +69,24 @@ func DumpDir() string {
 	return filepath.Join(config.GetCacheDir(), "dumps")
 }
 
-// ImportStatePath returns the local import state path for a backend provider name.
-func ImportStatePath(provider string) string {
-	return filepath.Join(DumpDir(), "import_state_"+strings.ToLower(provider)+".gob")
+// ImportStateHashesPath returns the local hash import state path for a backend provider name.
+func ImportStateHashesPath(provider string) string {
+	return filepath.Join(DumpDir(), "import_state_"+strings.ToLower(provider)+"_Hashes.txt")
+}
+
+// ImportStateSourceFilesPath returns the local source-file import state path for a backend provider name.
+func ImportStateSourceFilesPath(provider string) string {
+	return filepath.Join(DumpDir(), "import_state_"+strings.ToLower(provider)+"_SourceFiles.txt")
+}
+
+// SourceDir returns the provider-specific local directory used for source-file dumps.
+func SourceDir(provider string) string {
+	return filepath.Join(DumpDir(), cleanProvider(provider))
 }
 
 // SourceFilename returns the dump filename for a source file transfer name.
 func SourceFilename(name, ext string) string {
-	_, name = SplitIncrementPrefix(name)
-	name = strings.TrimSpace(name)
+	name = cleanSourceName(name)
 	if name == "" {
 		name = "transfer"
 	}
@@ -96,6 +105,43 @@ func SourceFilename(name, ext string) string {
 	return name + ext
 }
 
+// SourceKey returns the comparison key for source dumps and transfer names.
+func SourceKey(name string) string {
+	name = cleanSourceName(name)
+	lowerName := strings.ToLower(name)
+	for _, ext := range []string{".torrent", ".nzb"} {
+		if strings.HasSuffix(lowerName, ext) {
+			return name[:len(name)-len(ext)]
+		}
+	}
+	return name
+}
+
+// SourceProvider returns the source provider encoded by a source-file dump path.
+func SourceProvider(sourcePath string) string {
+	provider := cleanProvider(filepath.Base(filepath.Dir(sourcePath)))
+	if provider == "dumps" || provider == "." {
+		return "unknown"
+	}
+	return provider
+}
+
+func cleanSourceName(name string) string {
+	_, name = SplitIncrementPrefix(name)
+	name = strings.TrimSpace(name)
+	name = strings.NewReplacer("/", "_", "\\", "_").Replace(name)
+	return name
+}
+
+func cleanProvider(provider string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	provider = strings.NewReplacer("/", "_", "\\", "_").Replace(provider)
+	if provider == "" {
+		return "unknown"
+	}
+	return provider
+}
+
 // SourceDumpFilename returns the increment-prefixed dump filename for a source file transfer name.
 func SourceDumpFilename(dir, name, ext string) string {
 	filename := SourceFilename(name, ext)
@@ -110,15 +156,15 @@ func NZBFilename(name string) string {
 	return SourceFilename(name, ".nzb")
 }
 
-// LocalSourcePath returns the local path for a source file dump filename or transfer name.
-func LocalSourcePath(name, ext string) string {
-	dir := DumpDir()
+// LocalSourcePath returns the local path for a provider source file dump.
+func LocalSourcePath(provider, name, ext string) string {
+	dir := SourceDir(provider)
 	return filepath.Join(dir, SourceDumpFilename(dir, name, ext))
 }
 
 // LocalNZBPath returns the local path for an NZB dump filename or transfer name.
-func LocalNZBPath(name string) string {
-	return LocalSourcePath(name, ".nzb")
+func LocalNZBPath(provider, name string) string {
+	return LocalSourcePath(provider, name, ".nzb")
 }
 
 // RemoteScanTargetProvider returns the configured provider for remote dump imports.
@@ -311,27 +357,18 @@ func Read(path string) (*Dump, error) {
 
 // ReadImportState reads the persistent import state for a provider.
 func ReadImportState(provider string) (*ImportState, error) {
-	path := ImportStatePath(provider)
-	in, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return &ImportState{Version: 1, HashIncrements: make(map[string]uint64)}, nil
+	state := &ImportState{
+		Version:              1,
+		HashIncrements:       make(map[string]uint64),
+		SourceFileIncrements: make(map[string]uint64),
 	}
-	if err != nil {
+	if err := readHashImportState(provider, state); err != nil {
 		return nil, err
 	}
-	defer in.Close()
-	var state ImportState
-	err = gob.NewDecoder(in).Decode(&state)
-	if err != nil {
+	if err := readSourceFileImportState(provider, state); err != nil {
 		return nil, err
 	}
-	if state.HashIncrements == nil {
-		state.HashIncrements = make(map[string]uint64)
-	}
-	if state.Version == 0 {
-		state.Version = 1
-	}
-	return &state, nil
+	return state, nil
 }
 
 // WriteImportState writes the persistent import state for a provider.
@@ -342,28 +379,120 @@ func WriteImportState(provider string, state *ImportState) error {
 	if state.HashIncrements == nil {
 		state.HashIncrements = make(map[string]uint64)
 	}
+	if state.SourceFileIncrements == nil {
+		state.SourceFileIncrements = make(map[string]uint64)
+	}
 	state.Version = 1
-	path := ImportStatePath(provider)
+	if err := writeHashImportState(provider, state); err != nil {
+		return err
+	}
+	return writeSourceFileImportState(provider, state)
+}
+
+func readHashImportState(provider string, state *ImportState) error {
+	path := ImportStateHashesPath(provider)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		increment, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid hash import state line %q: %w", line, err)
+		}
+		state.HashIncrements[fields[0]] = increment
+	}
+	return nil
+}
+
+func readSourceFileImportState(provider string, state *ImportState) error {
+	path := ImportStateSourceFilesPath(provider)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		sourceProvider := "premiumize"
+		value := ""
+		switch len(fields) {
+		case 1:
+			value = fields[0]
+		default:
+			sourceProvider = fields[0]
+			value = fields[1]
+		}
+		increment, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid source-file import state line %q: %w", line, err)
+		}
+		state.SourceFileIncrements[sourceProvider] = increment
+	}
+	return nil
+}
+
+func writeHashImportState(provider string, state *ImportState) error {
+	keys := make([]string, 0, len(state.HashIncrements))
+	for key := range state.HashIncrements {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	b.WriteString("# provider increment\n")
+	for _, key := range keys {
+		fmt.Fprintf(&b, "%s %d\n", key, state.HashIncrements[key])
+	}
+	return writeTextAtomic(ImportStateHashesPath(provider), b.String())
+}
+
+func writeSourceFileImportState(provider string, state *ImportState) error {
+	keys := make([]string, 0, len(state.SourceFileIncrements))
+	for key := range state.SourceFileIncrements {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	b.WriteString("# provider increment\n")
+	for _, key := range keys {
+		fmt.Fprintf(&b, "%s %d\n", key, state.SourceFileIncrements[key])
+	}
+	return writeTextAtomic(ImportStateSourceFilesPath(provider), b.String())
+}
+
+func writeTextAtomic(path, data string) error {
 	err := os.MkdirAll(filepath.Dir(path), 0700)
 	if err != nil {
 		return err
 	}
 	tmpPath := path + ".tmp"
-	out, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	err = os.WriteFile(tmpPath, []byte(data), 0644)
 	if err != nil {
 		return err
 	}
-	encodeErr := gob.NewEncoder(out).Encode(state)
-	closeErr := out.Close()
-	if encodeErr != nil {
+	err = os.Rename(tmpPath, path)
+	if err != nil {
 		_ = os.Remove(tmpPath)
-		return encodeErr
+		return err
 	}
-	if closeErr != nil {
-		_ = os.Remove(tmpPath)
-		return closeErr
-	}
-	return os.Rename(tmpPath, path)
+	return os.Chmod(path, 0644)
 }
 
 // RemoteDumpPaths returns remote dump files mounted locally.
@@ -409,15 +538,15 @@ func SourcePathIncrement(path string) uint64 {
 // SourceComparableFilename returns the source filename without its increment prefix.
 func SourceComparableFilename(path string) string {
 	_, filename := SplitIncrementPrefix(filepath.Base(path))
-	ext := filepath.Ext(filename)
-	return SourceFilename(filename, ext)
+	return SourceKey(filename)
 }
 
 func existingSourceDumpFilename(dir, filename string) string {
+	key := SourceKey(filename)
 	for _, pattern := range []string{"*.nzb", "*.torrent"} {
 		matches, _ := filepath.Glob(filepath.Join(dir, pattern))
 		for _, match := range matches {
-			if SourceComparableFilename(match) == filename {
+			if SourceComparableFilename(match) == key {
 				return filepath.Base(match)
 			}
 		}

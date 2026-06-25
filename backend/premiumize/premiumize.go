@@ -110,6 +110,7 @@ type Fs struct {
 	folderCache     map[string]cachedFolder
 	activeOpens     map[string]int
 	pendingCleanup  map[string]pendingCleanup
+	cleanupMu       sync.Mutex
 	readyTransfers  map[string]struct{}
 	readyLoaded     bool
 	startupDone     chan struct{}
@@ -422,9 +423,9 @@ func (f *Fs) recordCompletedHashLocked(value string) {
 }
 
 func (f *Fs) recordKnownSourceFileLocked(name, ext string) {
-	filename := torrentdump.SourceFilename(name, ext)
-	if filename != "" {
-		f.knownSourceFiles[filename] = struct{}{}
+	key := torrentdump.SourceKey(torrentdump.SourceFilename(name, ext))
+	if key != "" {
+		f.knownSourceFiles[key] = struct{}{}
 	}
 }
 
@@ -536,14 +537,15 @@ func (f *Fs) importRemoteDumps(ctx context.Context) {
 func (f *Fs) importRemoteSourceFiles(ctx context.Context, state *torrentdump.ImportState) {
 	local := f.localKnownSourceFiles()
 	for _, sourcePath := range torrentdump.RemoteSourcePaths() {
+		sourceProvider := torrentdump.SourceProvider(sourcePath)
 		increment := torrentdump.SourcePathIncrement(sourcePath)
-		if increment > 0 && increment <= state.SourceFileIncrement {
+		if increment > 0 && increment <= state.SourceFileIncrements[sourceProvider] {
 			continue
 		}
-		filename := torrentdump.SourceComparableFilename(sourcePath)
-		if _, ok := local[filename]; ok {
-			if increment > state.SourceFileIncrement {
-				state.SourceFileIncrement = increment
+		key := torrentdump.SourceComparableFilename(sourcePath)
+		if _, ok := local[key]; ok {
+			if increment > state.SourceFileIncrements[sourceProvider] {
+				state.SourceFileIncrements[sourceProvider] = increment
 			}
 			continue
 		}
@@ -552,12 +554,12 @@ func (f *Fs) importRemoteSourceFiles(ctx context.Context, state *torrentdump.Imp
 			fs.Debugf(f, "Premiumize remote source file import failed: path=%s: %v", sourcePath, err)
 			break
 		}
-		local[filename] = struct{}{}
+		local[key] = struct{}{}
 		f.mu.Lock()
-		f.knownSourceFiles[filename] = struct{}{}
+		f.knownSourceFiles[key] = struct{}{}
 		f.mu.Unlock()
-		if increment > state.SourceFileIncrement {
-			state.SourceFileIncrement = increment
+		if increment > state.SourceFileIncrements[sourceProvider] {
+			state.SourceFileIncrements[sourceProvider] = increment
 		}
 		fs.Debugf(f, "Premiumize remote source file imported: path=%s", sourcePath)
 	}
@@ -923,13 +925,9 @@ func (f *Fs) dumpSourceFile(ctx context.Context, transfer api.Transfer, source t
 	if source.sourceExt == "" {
 		source.sourceExt = sourceFileExtFromTransferName(transfer.Name)
 	}
-	if source.sourceExt == "" {
-		fs.Debugf(f, "Premiumize source file dump skipped, unknown extension: transfer_id=%s name=%q", transfer.ID, transfer.Name)
-		return source
-	}
 	if source.sourceExt != "" {
 		f.recordKnownSourceFileLocked(transfer.Name, source.sourceExt)
-		dumpPath := torrentdump.LocalSourcePath(transfer.Name, source.sourceExt)
+		dumpPath := torrentdump.LocalSourcePath("premiumize", transfer.Name, source.sourceExt)
 		if _, err := os.Stat(dumpPath); err == nil {
 			return source
 		}
@@ -940,7 +938,7 @@ func (f *Fs) dumpSourceFile(ctx context.Context, transfer api.Transfer, source t
 		return source
 	}
 
-	dumpPath := torrentdump.LocalSourcePath(transfer.Name, source.sourceExt)
+	dumpPath := torrentdump.LocalSourcePath("premiumize", transfer.Name, source.sourceExt)
 	if _, err := os.Stat(dumpPath); err == nil {
 		return source
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -998,12 +996,12 @@ func sourceFileExtFromTransferName(value string) string {
 	nzbIndex := strings.LastIndex(value, ".nzb")
 	torrentIndex := strings.LastIndex(value, ".torrent")
 	switch {
-	case nzbIndex < 0 && torrentIndex < 0:
-		return ""
 	case torrentIndex > nzbIndex:
 		return ".torrent"
-	default:
+	case nzbIndex >= 0:
 		return ".nzb"
+	default:
+		return ".torrent"
 	}
 }
 
@@ -1055,7 +1053,7 @@ func (f *Fs) runPendingCleanupAfter(transferID string, delay time.Duration) {
 
 	if !cleanup.empty() {
 		fs.Debugf(f, "Premiumize deferred cloud cleanup starting: transfer_id=%s", cleanup.transferID)
-		err := f.completeCloudCleanup(context.Background(), cleanup)
+		err := f.runCloudCleanup(context.Background(), cleanup)
 		if err != nil {
 			fs.Debugf(f, "Premiumize deferred cloud cleanup failed: transfer_id=%s: %v", cleanup.transferID, err)
 		}
@@ -1089,7 +1087,7 @@ func (f *Fs) finishOpen(transferID string) {
 
 	if !cleanup.empty() {
 		fs.Debugf(f, "Premiumize deferred cloud cleanup starting: transfer_id=%s", cleanup.transferID)
-		err := f.completeCloudCleanup(context.Background(), cleanup)
+		err := f.runCloudCleanup(context.Background(), cleanup)
 		if err != nil {
 			fs.Debugf(f, "Premiumize deferred cloud cleanup failed: transfer_id=%s: %v", cleanup.transferID, err)
 		}
@@ -2123,13 +2121,32 @@ func (f *Fs) deleteCloudItem(ctx context.Context, fileID, folderID string) error
 	return nil
 }
 
+func (f *Fs) runCloudCleanup(ctx context.Context, cleanup pendingCleanup) error {
+	f.cleanupMu.Lock()
+	defer f.cleanupMu.Unlock()
+	return f.completeCloudCleanup(ctx, cleanup)
+}
+
+func isTerminalCloudDeleteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "owner does not match") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "does not exist")
+}
+
 func (f *Fs) completeCloudCleanup(ctx context.Context, cleanup pendingCleanup) error {
 	if cleanup.empty() {
 		return nil
 	}
 	err := f.deleteCloudItem(ctx, cleanup.fileID, cleanup.folderID)
 	if err != nil {
-		return err
+		if !isTerminalCloudDeleteError(err) {
+			return err
+		}
+		fs.Debugf(f, "Premiumize cloud cleanup marking terminal delete error as done: transfer_id=%s: %v", cleanup.transferID, err)
 	}
 
 	f.mu.Lock()

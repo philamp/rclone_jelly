@@ -10,7 +10,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -103,8 +105,10 @@ type Fs struct {
 	dlURLs           map[string]string
 	knownHashes      map[string]struct{}
 	completedHashes  map[string]struct{}
+	knownSourceFiles map[string]struct{}
 	dumpPath         string
 	subscriptionDays int
+	userPlan         int
 	subscriptionTime time.Time
 
 	requestdlWindowMu sync.Mutex
@@ -232,20 +236,21 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	srv.SetErrorHandler(errorHandler)
 
 	f := &Fs{
-		name:            name,
-		root:            root,
-		opt:             *opt,
-		srv:             srv,
-		dlSrv:           rest.NewClient(client),
-		pacer:           fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
-		requestdlPacer:  fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(requestdlMinSleep), pacer.MaxSleep(requestdlMaxSleep), pacer.DecayConstant(decayConstant))),
-		dirs:            make(map[string]*entry),
-		files:           make(map[string]*entry),
-		dlURLs:          make(map[string]string),
-		knownHashes:     make(map[string]struct{}),
-		completedHashes: make(map[string]struct{}),
-		dumpPath:        torrentdump.Path("torbox"),
-		startupDone:     make(chan struct{}),
+		name:             name,
+		root:             root,
+		opt:              *opt,
+		srv:              srv,
+		dlSrv:            rest.NewClient(client),
+		pacer:            fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+		requestdlPacer:   fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(requestdlMinSleep), pacer.MaxSleep(requestdlMaxSleep), pacer.DecayConstant(decayConstant))),
+		dirs:             make(map[string]*entry),
+		files:            make(map[string]*entry),
+		dlURLs:           make(map[string]string),
+		knownHashes:      make(map[string]struct{}),
+		completedHashes:  make(map[string]struct{}),
+		knownSourceFiles: make(map[string]struct{}),
+		dumpPath:         torrentdump.Path("torbox"),
+		startupDone:      make(chan struct{}),
 		readyTransfers: map[sourceType]map[int]struct{}{
 			sourceTorrent: make(map[int]struct{}),
 			sourceUsenet:  make(map[int]struct{}),
@@ -293,6 +298,13 @@ func (f *Fs) recordCompletedHashLocked(value string) {
 	}
 }
 
+func (f *Fs) recordKnownSourceFileLocked(name string) {
+	key := torrentdump.SourceKey(name)
+	if key != "" {
+		f.knownSourceFiles[key] = struct{}{}
+	}
+}
+
 func (f *Fs) localKnownHashes() map[string]struct{} {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -309,6 +321,16 @@ func (f *Fs) localCompletedHashes() map[string]struct{} {
 	out := make(map[string]struct{}, len(f.completedHashes))
 	for hash := range f.completedHashes {
 		out[hash] = struct{}{}
+	}
+	return out
+}
+
+func (f *Fs) localKnownSourceFiles() map[string]struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]struct{}, len(f.knownSourceFiles))
+	for filename := range f.knownSourceFiles {
+		out[filename] = struct{}{}
 	}
 	return out
 }
@@ -347,6 +369,75 @@ func (f *Fs) createTorrent(ctx context.Context, hash string) error {
 	})
 	if err != nil {
 		fs.Debugf(f, "TorBox API error: POST /torrents/createtorrent hash=%s: %v", torrentdump.NormalizeHash(hash), err)
+		return err
+	}
+	if !result.Success {
+		return &result
+	}
+	return nil
+}
+
+func (f *Fs) createTorrentFromFile(ctx context.Context, torrentPath string) error {
+	in, err := os.Open(torrentPath)
+	if err != nil {
+		return err
+	}
+	defer fs.CheckClose(in, &err)
+
+	filename := torrentdump.SourceFilename(filepath.Base(torrentPath), ".torrent")
+	params := url.Values{}
+	params.Set("seed", "1")
+	opts := rest.Opts{
+		Method:               "POST",
+		Path:                 "/torrents/createtorrent",
+		Body:                 in,
+		MultipartParams:      params,
+		MultipartContentName: "file",
+		MultipartFileName:    filename,
+		MultipartContentType: "application/x-bittorrent",
+	}
+	var resp *http.Response
+	var result api.Response
+	fs.Debugf(f, "TorBox API call: POST /torrents/createtorrent torrent=%s", filename)
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		fs.Debugf(f, "TorBox API error: POST /torrents/createtorrent torrent=%s: %v", filename, err)
+		return err
+	}
+	if !result.Success {
+		return &result
+	}
+	return nil
+}
+
+func (f *Fs) createUsenetFromNZB(ctx context.Context, nzbPath string) error {
+	in, err := os.Open(nzbPath)
+	if err != nil {
+		return err
+	}
+	defer fs.CheckClose(in, &err)
+
+	filename := torrentdump.SourceFilename(filepath.Base(nzbPath), ".nzb")
+	opts := rest.Opts{
+		Method:               "POST",
+		Path:                 "/usenet/createusenetdownload",
+		Body:                 in,
+		MultipartContentName: "file",
+		MultipartFileName:    filename,
+		MultipartContentType: "application/x-nzb",
+	}
+	var resp *http.Response
+	var result api.Response
+	fs.Debugf(f, "TorBox API call: POST /usenet/createusenetdownload nzb=%s", filename)
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		fs.Debugf(f, "TorBox API error: POST /usenet/createusenetdownload nzb=%s: %v", filename, err)
 		return err
 	}
 	if !result.Success {
@@ -401,9 +492,61 @@ func (f *Fs) importRemoteDumps(ctx context.Context) {
 			fs.Debugf(f, "TorBox remote dump hash imported: hash=%s provider=%s", hash, dump.Provider)
 		}
 	}
+	f.importRemoteSourceFiles(ctx, state)
 	err = torrentdump.WriteImportState("torbox", state)
 	if err != nil {
 		fs.Debugf(f, "TorBox remote dump import state write failed: %v", err)
+	}
+}
+
+func (f *Fs) importRemoteSourceFiles(ctx context.Context, state *torrentdump.ImportState) {
+	local := f.localKnownSourceFiles()
+	for _, sourcePath := range torrentdump.RemoteSourcePaths() {
+		sourceProvider := torrentdump.SourceProvider(sourcePath)
+		increment := torrentdump.SourcePathIncrement(sourcePath)
+		if increment > 0 && increment <= state.SourceFileIncrements[sourceProvider] {
+			continue
+		}
+		key := torrentdump.SourceComparableFilename(sourcePath)
+		if _, ok := local[key]; ok {
+			if increment > state.SourceFileIncrements[sourceProvider] {
+				state.SourceFileIncrements[sourceProvider] = increment
+			}
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(sourcePath))
+		var err error
+		switch ext {
+		case ".nzb":
+			if !f.usenetCreateSupported(ctx) {
+				fs.Debugf(f, "TorBox remote NZB import skipped because user plan does not support Usenet create: path=%s", sourcePath)
+				local[key] = struct{}{}
+				f.mu.Lock()
+				f.knownSourceFiles[key] = struct{}{}
+				f.mu.Unlock()
+				if increment > state.SourceFileIncrements[sourceProvider] {
+					state.SourceFileIncrements[sourceProvider] = increment
+				}
+				continue
+			}
+			err = f.createUsenetFromNZB(ctx, sourcePath)
+		case ".torrent":
+			err = f.createTorrentFromFile(ctx, sourcePath)
+		default:
+			continue
+		}
+		if err != nil {
+			fs.Debugf(f, "TorBox remote source file import failed: path=%s: %v", sourcePath, err)
+			break
+		}
+		local[key] = struct{}{}
+		f.mu.Lock()
+		f.knownSourceFiles[key] = struct{}{}
+		f.mu.Unlock()
+		if increment > state.SourceFileIncrements[sourceProvider] {
+			state.SourceFileIncrements[sourceProvider] = increment
+		}
+		fs.Debugf(f, "TorBox remote source file imported: path=%s", sourcePath)
 	}
 }
 
@@ -454,9 +597,9 @@ func (f *Fs) pollReadyTransfers(ctx context.Context) (map[sourceType]map[int]str
 	return ready, nil
 }
 
-func (f *Fs) subscriptionDaysLocked(ctx context.Context) (int, error) {
+func (f *Fs) subscriptionInfoLocked(ctx context.Context) (days int, plan int, err error) {
 	if !f.subscriptionTime.IsZero() && time.Since(f.subscriptionTime) < subscriptionTTL {
-		return f.subscriptionDays, nil
+		return f.subscriptionDays, f.userPlan, nil
 	}
 	params := url.Values{}
 	params.Set("settings", "false")
@@ -469,10 +612,10 @@ func (f *Fs) subscriptionDaysLocked(ctx context.Context) (int, error) {
 	var result struct {
 		api.Response
 		Data struct {
+			Plan             int    `json:"plan"`
 			PremiumExpiresAt string `json:"premium_expires_at"`
 		} `json:"data"`
 	}
-	var err error
 	fs.Debugf(f, "TorBox API call: GET /user/me settings=false")
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
@@ -480,29 +623,45 @@ func (f *Fs) subscriptionDaysLocked(ctx context.Context) (int, error) {
 	})
 	if err != nil {
 		fs.Debugf(f, "TorBox API error: GET /user/me: %v", err)
-		return 0, err
+		return 0, 0, err
 	}
 	if !result.Success {
-		return 0, &result.Response
+		return 0, 0, &result.Response
 	}
 	expiresAt, err := time.Parse(time.RFC3339Nano, result.Data.PremiumExpiresAt)
 	if err != nil || result.Data.PremiumExpiresAt == "" {
 		f.subscriptionDays = 0
+		f.userPlan = result.Data.Plan
 		f.subscriptionTime = time.Now()
-		return 0, nil
+		return 0, f.userPlan, nil
 	}
-	days := int(time.Until(expiresAt).Hours() / 24)
+	days = int(time.Until(expiresAt).Hours() / 24)
 	if days < 0 {
 		days = 0
 	}
 	f.subscriptionDays = days
+	f.userPlan = result.Data.Plan
 	f.subscriptionTime = time.Now()
 	status := 0
 	if resp != nil {
 		status = resp.StatusCode
 	}
 	fs.Debugf(f, "TorBox API response: GET /user/me status=%d subscription_days=%d", status, days)
-	return days, nil
+	return days, f.userPlan, nil
+}
+
+func (f *Fs) usenetCreateSupported(ctx context.Context) bool {
+	f.mu.Lock()
+	valid := !f.subscriptionTime.IsZero() && time.Since(f.subscriptionTime) < subscriptionTTL
+	plan := f.userPlan
+	f.mu.Unlock()
+	if !valid {
+		_, _, _ = f.subscriptionInfoLocked(ctx)
+		f.mu.Lock()
+		plan = f.userPlan
+		f.mu.Unlock()
+	}
+	return plan >= 2
 }
 
 // ChangeNotify watches TorBox mylist readiness at the rclone poll interval.
@@ -674,14 +833,19 @@ func (f *Fs) refresh(ctx context.Context) error {
 	addDir(string(sourceTorrent), now)
 	addDir(string(sourceUsenet), now)
 	addDir(subscriptionDir, now)
-	if days, err := f.subscriptionDaysLocked(ctx); err == nil {
-		remote := path.Join(subscriptionDir, fmt.Sprintf("%d.days", days))
-		files[remote] = &entry{
-			remote:  remote,
-			name:    path.Base(remote),
-			id:      "subscription",
-			modTime: now,
-			virtual: true,
+	if days, plan, err := f.subscriptionInfoLocked(ctx); err == nil {
+		for _, name := range []string{
+			fmt.Sprintf("%d.days", days),
+			fmt.Sprintf("%d.plan", plan),
+		} {
+			remote := path.Join(subscriptionDir, name)
+			files[remote] = &entry{
+				remote:  remote,
+				name:    path.Base(remote),
+				id:      "subscription",
+				modTime: now,
+				virtual: true,
+			}
 		}
 	}
 
@@ -690,6 +854,7 @@ func (f *Fs) refresh(ctx context.Context) error {
 			if list.source == sourceTorrent {
 				f.recordKnownHashLocked(transfer.Hash)
 			}
+			f.recordKnownSourceFileLocked(transfer.Name)
 			if !transferReady(transfer) {
 				continue
 			}
