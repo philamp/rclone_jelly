@@ -1431,6 +1431,36 @@ func (f *Fs) updateCachedFileURL(transferID, contentPath, downloadURL string, si
 	}
 }
 
+func (f *Fs) updateCachedItemURL(itemID, downloadURL string, size int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, info := range f.files {
+		if info.id == itemID {
+			info.url = downloadURL
+			if size > 0 {
+				info.size = size
+			}
+		}
+	}
+	for cacheKey, cached := range f.folderCache {
+		if cached.file != nil && cached.file.ID == itemID {
+			cached.file.Link = downloadURL
+			if size > 0 {
+				cached.file.Size = size
+			}
+		}
+		for i := range cached.content {
+			if cached.content[i].ID == itemID {
+				cached.content[i].Link = downloadURL
+				if size > 0 {
+					cached.content[i].Size = size
+				}
+			}
+		}
+		f.folderCache[cacheKey] = cached
+	}
+}
+
 func (f *Fs) addStoredTransfers(files map[string]*entry, dirs map[string]*entry, addDir func(string, time.Time, string), liveTransfers map[string]struct{}) {
 	for _, stored := range f.stored {
 		if _, ok := liveTransfers[stored.ID]; ok {
@@ -2079,6 +2109,33 @@ func (o *Object) refreshStoredDownloadURL(ctx context.Context) error {
 	return fmt.Errorf("directdl refreshed transfer but did not return path %q", o.contentPath)
 }
 
+func (o *Object) refreshCloudItemDownloadURL(ctx context.Context) error {
+	if o.id == "" {
+		return errors.New("object is missing Premiumize item ID")
+	}
+	item, err := o.fs.itemDetails(ctx, o.id)
+	if err != nil {
+		return err
+	}
+	if item.Link == "" {
+		return errors.New("item/details returned no download URL")
+	}
+	o.url = item.Link
+	if item.Size > 0 {
+		o.size = item.Size
+	}
+	o.fs.updateCachedItemURL(o.id, o.url, o.size)
+	fs.Debugf(o, "Premiumize folder item CDN URL refreshed: item_id=%s", o.id)
+	return nil
+}
+
+func (o *Object) refreshDownloadURL(ctx context.Context) error {
+	if o.transferSrc != "" && o.contentPath != "" {
+		return o.refreshStoredDownloadURL(ctx)
+	}
+	return o.refreshCloudItemDownloadURL(ctx)
+}
+
 // Open an object for read.
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadCloser, error) {
 	err := o.readMetaData(ctx)
@@ -2089,7 +2146,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 		return io.NopCloser(bytes.NewReader(nil)), nil
 	}
 	if o.url == "" {
-		err = o.refreshStoredDownloadURL(ctx)
+		err = o.refreshDownloadURL(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("can't download - missing download URL: %w", err)
 		}
@@ -2099,11 +2156,8 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	if err == nil {
 		return o.wrapOpen(in), nil
 	}
-	if o.transferSrc == "" || o.contentPath == "" {
-		return nil, err
-	}
-	fs.Debugf(o, "Premiumize stored CDN URL failed, trying to refresh it: %v", err)
-	refreshErr := o.refreshStoredDownloadURL(ctx)
+	fs.Debugf(o, "Premiumize CDN URL failed, trying to refresh it: %v", err)
+	refreshErr := o.refreshDownloadURL(ctx)
 	if refreshErr != nil {
 		return nil, fmt.Errorf("%w; refresh failed: %v", err, refreshErr)
 	}
