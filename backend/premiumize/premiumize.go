@@ -17,7 +17,6 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -392,21 +391,6 @@ func (f *Fs) loadStore() error {
 		store.Transfers = make(map[string]storedTransfer)
 	}
 	f.stored = store.Transfers
-	migrated := false
-	for transferID, stored := range f.stored {
-		content, changed := dedupeStoredContent(stored.Content, stored.Name)
-		if changed {
-			stored.Content = content
-			f.stored[transferID] = stored
-			migrated = true
-		}
-	}
-	if migrated {
-		err = f.saveStore()
-		if err != nil {
-			return err
-		}
-	}
 	fs.Debugf(f, "Loaded Premiumize persistent transfer cache: transfers=%d", len(f.stored))
 	return nil
 }
@@ -1350,7 +1334,6 @@ func (f *Fs) refresh(ctx context.Context) error {
 			if err != nil {
 				fs.Debugf(f, "Premiumize directdl failed for transfer %s, falling back to folder data: %v", transfer.ID, err)
 			} else {
-				content = dedupeDirectDLContent(content, transfer.Name)
 				err = f.storeDirectDLTransfer(transfer, src, transferFileID, transferDirID, content)
 				if err == nil {
 					f.queueCleanupLocked(transfer.ID)
@@ -1487,42 +1470,6 @@ func addDirectDLContent(files map[string]*entry, dirs map[string]*entry, addDir 
 	}
 }
 
-func dedupeDirectDLContent(content []api.DirectDLContent, transferName string) []api.DirectDLContent {
-	seen := make(map[string]struct{}, len(content))
-	out := content[:0]
-	for i := range content {
-		key := directDLDedupeKey(content[i].Path, content[i].Size, transferName)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, content[i])
-	}
-	return out
-}
-
-func dedupeStoredContent(content []storedDirectFile, transferName string) ([]storedDirectFile, bool) {
-	seen := make(map[string]struct{}, len(content))
-	out := content[:0]
-	for i := range content {
-		key := directDLDedupeKey(content[i].Path, content[i].Size, transferName)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, content[i])
-	}
-	return out, len(out) != len(content)
-}
-
-func directDLDedupeKey(contentPath string, size int64, transferName string) string {
-	cleanPath := path.Clean(cleanDirectDLPath(contentPath, transferName))
-	if cleanPath == "." {
-		cleanPath = ""
-	}
-	return strings.ToLower(cleanPath) + "\x00" + strconv.FormatInt(size, 10)
-}
-
 func cleanDirectDLPath(value, transferName string) string {
 	value = strings.Trim(value, "/")
 	transferName = strings.Trim(transferName, "/")
@@ -1540,7 +1487,10 @@ func cleanDirectDLPath(value, transferName string) string {
 }
 
 func addDirectDLFile(files map[string]*entry, dirs map[string]*entry, addDir func(string, time.Time, string), remote string, item *api.DirectDLContent, transferID, transferRoot, transferFileID, transferDirID, transferSrc string, modTime time.Time) {
-	remote = uniqueFile(files, remote, transferID, path.Base(remote))
+	remote = strings.Trim(remote, "/")
+	if _, ok := files[remote]; ok {
+		return
+	}
 	parent := path.Dir(remote)
 	if parent != "." {
 		addDir(parent, modTime, "")
@@ -2086,7 +2036,7 @@ func (o *Object) refreshStoredDownloadURL(ctx context.Context) error {
 	if o.transferID == "" || o.transferSrc == "" || o.contentPath == "" {
 		return errors.New("object is not backed by a persistent Premiumize transfer")
 	}
-	stored, _, ok := o.fs.storedFile(o.transferID, o.contentPath)
+	_, _, ok := o.fs.storedFile(o.transferID, o.contentPath)
 	if !ok {
 		return errors.New("persistent Premiumize transfer entry not found")
 	}
@@ -2113,7 +2063,6 @@ func (o *Object) refreshStoredDownloadURL(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("directdl after cache hit failed: %w", err)
 	}
-	content = dedupeDirectDLContent(content, stored.Name)
 	err = o.fs.replaceStoredTransferContent(o.transferID, content)
 	if err != nil {
 		return fmt.Errorf("update persistent transfer after directdl failed: %w", err)
